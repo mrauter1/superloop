@@ -1,0 +1,5 @@
+Analyzer note: verification is blocked by missing SSO tenant policy.
+
+<loop-control>
+{"schema":"docloop.loop_control/v1","kind":"promise","promise":"BLOCKED"}
+</loop-control>
