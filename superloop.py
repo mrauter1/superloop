@@ -2919,6 +2919,12 @@ def main() -> int:
         if recorder is not None and run_paths is not None and run_id is not None and run_status != "setup":
             recorder.emit("run_finished", status=run_status, exit_code=exit_code)
             write_run_summary(run_paths["summary_file"], run_id, run_paths["events_file"])
+            if use_git:
+                commit_tracked_changes(
+                    root,
+                    f"superloop: finalize run artifacts ({run_status})",
+                    task_scoped_paths,
+                )
 
 
 if __name__ == "__main__":
