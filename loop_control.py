@@ -93,10 +93,7 @@ def _parse_canonical_control(stdout: str, canonical_match: re.Match[str]) -> Loo
 
     if not isinstance(payload, dict):
         raise LoopControlParseError("Canonical loop-control payload must decode to a JSON object.")
-    if payload.get("schema") != CONTROL_SCHEMA_ID:
-        raise LoopControlParseError(
-            f"Canonical loop-control schema must be {CONTROL_SCHEMA_ID!r}."
-        )
+    _validate_canonical_schema(payload)
 
     kind = payload.get("kind")
     if kind == "question":
@@ -136,7 +133,7 @@ def _parse_canonical_promise(payload: dict[str, object], raw_payload: str) -> Lo
     promise = promise.upper()
     if promise not in PROMISE_VALUES:
         raise LoopControlParseError(
-            f"Canonical promise must be one of {PROMISE_COMPLETE}, {PROMISE_INCOMPLETE}, or {PROMISE_BLOCKED}."
+            f"Canonical promise must be one of {PROMISE_COMPLETE}, {PROMISE_INCOMPLETE}, or {PROMISE_BLOCKED}, not {promise!r}."
         )
 
     return LoopControl(
@@ -145,6 +142,13 @@ def _parse_canonical_promise(payload: dict[str, object], raw_payload: str) -> Lo
         source="canonical",
         raw_payload=raw_payload,
     )
+
+
+def _validate_canonical_schema(payload: dict[str, object]) -> None:
+    if payload.get("schema") != CONTROL_SCHEMA_ID:
+        raise LoopControlParseError(
+            f"Canonical loop-control schema must be {CONTROL_SCHEMA_ID!r}."
+        )
 
 
 def _parse_legacy_control(stdout: str) -> LoopControl:

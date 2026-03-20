@@ -30,6 +30,7 @@ from superloop import (
     task_request_text,
     task_id_for_run,
     write_run_summary,
+    verifier_scope_violations,
 )
 
 
@@ -362,6 +363,38 @@ def test_latest_run_status_reads_last_run_finished(tmp_path: Path):
         encoding="utf-8",
     )
     assert latest_run_status(events) == "success"
+
+
+def test_latest_run_status_skips_malformed_event_lines(tmp_path: Path):
+    events = tmp_path / "events.jsonl"
+    events.write_text(
+        '{"event_type":"run_finished","status":"failed"}\n'
+        '{"event_type":"run_finished","status":"success"}\n'
+        '{"event_type":"run_finished","status":"incomplete"\n',
+        encoding="utf-8",
+    )
+    assert latest_run_status(events) == "success"
+
+
+def test_verifier_scope_violations_ignores_superloop_artifacts():
+    task_root = ".superloop/tasks/task-1"
+    delta = {
+        ".superloop/tasks/task-1/runs/run-1/events.jsonl",
+        ".superloop/tasks/task-1/raw_phase_log.md",
+        ".superloop/tasks/task-1/implement/notes.md",
+        ".superloop/tasks/task-1/test/output.md",
+    }
+    assert verifier_scope_violations("implement", delta, task_root) == [".superloop/tasks/task-1/test/output.md"]
+
+
+def test_verifier_scope_violations_does_not_ignore_artifact_prefixed_files():
+    task_root = ".superloop/tasks/task-1"
+    delta = {
+        ".superloop/tasks/task-1/task.json.bak",
+        ".superloop/tasks/task-1/run_log.md.tmp",
+        ".superloop/tasks/task-1/runs-backup/log.jsonl",
+    }
+    assert verifier_scope_violations("implement", delta, task_root) == sorted(delta)
 
 def test_main_resume_refuses_terminal_run(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(superloop, "check_dependencies", lambda require_git=True: None)

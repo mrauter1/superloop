@@ -133,3 +133,8 @@ def test_superloop_complete_with_unchecked_criteria_is_downgraded():
 
     assert decision.action == "incomplete"
     assert decision.warning == "verifier emitted COMPLETE with unchecked criteria; downgrading to INCOMPLETE in lax guard mode."
+
+
+def test_parse_loop_control_invalid_promise_error_includes_rejected_value():
+    with pytest.raises(LoopControlParseError, match="not 'DONE'"):
+        parse_loop_control(fixture_text("canonical_invalid_promise.txt"))
