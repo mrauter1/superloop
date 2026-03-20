@@ -1,0 +1,4 @@
+<question>
+Question: Which event source is canonical?
+Best current guess: the Kafka topic.
+</question>

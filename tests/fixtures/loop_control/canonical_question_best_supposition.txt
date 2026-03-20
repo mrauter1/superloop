@@ -1,0 +1,3 @@
+<loop-control>
+{"schema":"docloop.loop_control/v1","kind":"question","question":"Should the importer reject duplicate IDs?","best_supposition":"Reject duplicates and surface a validation error."}
+</loop-control>
