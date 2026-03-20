@@ -507,20 +507,30 @@ def allowed_verifier_paths(pair: str, task_root: str) -> List[str]:
     return [f"{task_root}/{pair}/"]
 
 
-def verifier_scope_violations(pair: str, verifier_delta: Set[str], task_root: str) -> List[str]:
-    """Returns verifier writes that are outside its allowed scope."""
-    allowed = tuple(allowed_verifier_paths(pair, task_root))
-    return sorted(path for path in verifier_delta if not path.startswith(allowed))
-
-
-def tracked_superloop_paths(task_root: str, pair: Optional[str] = None) -> List[str]:
-    """Returns paths that Superloop may stage/commit."""
-    shared_paths = [
+def superloop_artifact_paths(task_root: str) -> List[str]:
+    """Returns repo-relative paths owned by Superloop orchestration."""
+    return [
         f"{task_root}/task.json",
         f"{task_root}/run_log.md",
         f"{task_root}/raw_phase_log.md",
         f"{task_root}/runs/",
     ]
+
+
+def verifier_scope_violations(pair: str, verifier_delta: Set[str], task_root: str) -> List[str]:
+    """Returns verifier writes that are outside its allowed scope and not orchestrator artifacts."""
+    allowed = tuple(allowed_verifier_paths(pair, task_root))
+    superloop_artifacts = tuple(superloop_artifact_paths(task_root))
+    return sorted(
+        path
+        for path in verifier_delta
+        if not path.startswith(allowed) and not path.startswith(superloop_artifacts)
+    )
+
+
+def tracked_superloop_paths(task_root: str, pair: Optional[str] = None) -> List[str]:
+    """Returns paths that Superloop may stage/commit."""
+    shared_paths = superloop_artifact_paths(task_root)
     if pair is None:
         pair_paths = [f"{task_root}/{name}/" for name in PAIR_ORDER]
     else:
@@ -2040,7 +2050,10 @@ def latest_run_status(events_file: Path) -> Optional[str]:
             line = line.strip()
             if not line:
                 continue
-            event = json.loads(line)
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
             if event.get("event_type") == "run_finished":
                 status = event.get("status")
                 if isinstance(status, str):
