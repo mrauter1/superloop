@@ -217,6 +217,38 @@ def test_resolve_runtime_config_rejects_unknown_top_level_keys(tmp_path: Path, m
         resolve_runtime_config(workspace_root, argparse.Namespace(model=None, model_effort=None))
 
 
+def test_resolve_runtime_config_rejects_non_string_top_level_key(tmp_path: Path, monkeypatch):
+    import pytest
+
+    install_fake_yaml(monkeypatch)
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    monkeypatch.setattr(superloop, "superloop_repo_root", lambda: tmp_path / "global")
+    write_superloop_config(
+        workspace_root / "superloop.yaml",
+        {"provider": {"model": "gpt-test"}, 1: "x"},
+    )
+
+    with pytest.raises(ConfigError, match="unsupported top-level keys: 1"):
+        resolve_runtime_config(workspace_root, argparse.Namespace(model=None, model_effort=None))
+
+
+def test_resolve_runtime_config_rejects_non_string_runtime_key(tmp_path: Path, monkeypatch):
+    import pytest
+
+    install_fake_yaml(monkeypatch)
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    monkeypatch.setattr(superloop, "superloop_repo_root", lambda: tmp_path / "global")
+    write_superloop_config(
+        workspace_root / "superloop.yaml",
+        {"runtime": {1: "x"}},
+    )
+
+    with pytest.raises(ConfigError, match="unsupported runtime keys: 1"):
+        resolve_runtime_config(workspace_root, argparse.Namespace(model=None, model_effort=None))
+
+
 def test_resolve_runtime_config_rejects_malformed_yaml(tmp_path: Path, monkeypatch):
     import pytest
 

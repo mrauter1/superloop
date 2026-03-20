@@ -573,13 +573,17 @@ def _optional_config_bool(raw_value: object, label: str, source: Path) -> Option
     return raw_value
 
 
+def _format_unknown_keys(keys: Iterable[object]) -> str:
+    return ", ".join(sorted(str(key) for key in keys))
+
+
 def parse_superloop_config(payload: object, source: Path) -> SuperloopConfigOverride:
     if not isinstance(payload, dict):
         raise ConfigError(f"{source}: configuration must be a YAML mapping.")
 
     unknown_top_level = sorted(key for key in payload if key not in {"provider", "runtime"})
     if unknown_top_level:
-        raise ConfigError(f"{source}: unsupported top-level keys: {', '.join(unknown_top_level)}")
+        raise ConfigError(f"{source}: unsupported top-level keys: {_format_unknown_keys(unknown_top_level)}")
 
     provider_payload = payload.get("provider")
     if provider_payload is not None and not isinstance(provider_payload, dict):
@@ -587,7 +591,7 @@ def parse_superloop_config(payload: object, source: Path) -> SuperloopConfigOver
     provider_payload = provider_payload or {}
     unknown_provider_keys = sorted(key for key in provider_payload if key not in {"model", "model_effort"})
     if unknown_provider_keys:
-        raise ConfigError(f"{source}: unsupported provider keys: {', '.join(unknown_provider_keys)}")
+        raise ConfigError(f"{source}: unsupported provider keys: {_format_unknown_keys(unknown_provider_keys)}")
     provider = ProviderConfigOverride(
         model=_optional_config_string(provider_payload.get("model"), "provider.model", source),
         model_effort=_optional_config_string(provider_payload.get("model_effort"), "provider.model_effort", source),
@@ -603,7 +607,7 @@ def parse_superloop_config(payload: object, source: Path) -> SuperloopConfigOver
         if key not in {"pairs", "max_iterations", "phase_mode", "intent_mode", "full_auto_answers", "no_git"}
     )
     if unknown_runtime_keys:
-        raise ConfigError(f"{source}: unsupported runtime keys: {', '.join(unknown_runtime_keys)}")
+        raise ConfigError(f"{source}: unsupported runtime keys: {_format_unknown_keys(unknown_runtime_keys)}")
     phase_mode = _optional_config_string(runtime_payload.get("phase_mode"), "runtime.phase_mode", source)
     if phase_mode is not None and phase_mode not in {PHASE_MODE_SINGLE, PHASE_MODE_UP_TO}:
         raise ConfigError(f"{source}: runtime.phase_mode must be one of: {PHASE_MODE_SINGLE}, {PHASE_MODE_UP_TO}.")
