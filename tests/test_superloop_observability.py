@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 import subprocess
 from pathlib import Path
@@ -8,12 +9,16 @@ import superloop
 
 from superloop import (
     CodexCommandConfig,
+    ConfigError,
     EventRecorder,
+    ProviderConfig,
+    RuntimeConfig,
     append_clarification,
     append_raw_phase_log,
     append_run_log,
     build_phase_prompt,
     create_run_paths,
+    discover_config_file,
     derive_intent_task_id,
     ensure_workspace,
     latest_run_id,
@@ -23,8 +28,10 @@ from superloop import (
     open_existing_run_paths,
     latest_run_status,
     phase_plan_file,
+    resolve_runtime_config,
     resolve_task_id,
     resolve_phase_selection,
+    resolve_codex_exec_command,
     restore_phase_selection,
     SessionState,
     task_request_text,
@@ -75,6 +82,276 @@ def write_phase_plan(path: Path, task_id: str, *, phases: list[dict[str, object]
         ],
     }
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def write_superloop_config(path: Path, payload: dict[str, object]):
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def test_discover_config_file_rejects_same_directory_ambiguity(tmp_path: Path):
+    import pytest
+
+    (tmp_path / "superloop.yaml").write_text("{}", encoding="utf-8")
+    (tmp_path / "superloop.config").write_text("{}", encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="multiple configuration files"):
+        discover_config_file(tmp_path)
+
+
+def test_resolve_runtime_config_uses_builtins_when_no_config_and_yaml_missing(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(superloop, "yaml", None)
+    monkeypatch.setattr(superloop, "superloop_repo_root", lambda: tmp_path / "global")
+
+    resolved = resolve_runtime_config(
+        tmp_path / "workspace",
+        argparse.Namespace(model=None, model_effort=None),
+    )
+
+    assert resolved.provider == ProviderConfig(model="gpt-5.4", model_effort=None)
+    assert resolved.runtime == RuntimeConfig(
+        pairs="plan,implement,test",
+        max_iterations=15,
+        phase_mode="single",
+        intent_mode="preserve",
+        full_auto_answers=False,
+        no_git=False,
+    )
+
+
+def test_resolve_runtime_config_applies_global_local_and_cli_precedence(tmp_path: Path, monkeypatch):
+    install_fake_yaml(monkeypatch)
+    global_root = tmp_path / "global"
+    workspace_root = tmp_path / "workspace"
+    global_root.mkdir()
+    workspace_root.mkdir()
+    monkeypatch.setattr(superloop, "superloop_repo_root", lambda: global_root)
+
+    write_superloop_config(
+        global_root / "superloop.yaml",
+        {
+            "provider": {"model": "gpt-global", "model_effort": "medium"},
+            "runtime": {"max_iterations": 9, "phase_mode": "up-to", "no_git": True},
+        },
+    )
+    write_superloop_config(
+        workspace_root / "superloop.config",
+        {"provider": {"model": "gpt-local"}, "runtime": {"max_iterations": 3, "no_git": False}},
+    )
+
+    resolved = resolve_runtime_config(
+        workspace_root,
+        argparse.Namespace(model=None, model_effort=None),
+    )
+    assert resolved.provider == ProviderConfig(model="gpt-local", model_effort="medium")
+    assert resolved.runtime.max_iterations == 3
+    assert resolved.runtime.phase_mode == "up-to"
+    assert resolved.runtime.no_git is False
+
+    cli_resolved = resolve_runtime_config(
+        workspace_root,
+        argparse.Namespace(model="gpt-cli", model_effort="high", max_iterations=4, no_git=True),
+    )
+    assert cli_resolved.provider == ProviderConfig(model="gpt-cli", model_effort="high")
+    assert cli_resolved.runtime.max_iterations == 4
+    assert cli_resolved.runtime.no_git is True
+
+
+def test_resolve_runtime_config_rejects_invalid_runtime_values(tmp_path: Path, monkeypatch):
+    import pytest
+
+    install_fake_yaml(monkeypatch)
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    monkeypatch.setattr(superloop, "superloop_repo_root", lambda: tmp_path / "global")
+    write_superloop_config(
+        workspace_root / "superloop.yaml",
+        {"runtime": {"max_iterations": 0}},
+    )
+
+    with pytest.raises(ConfigError, match="max_iterations"):
+        resolve_runtime_config(workspace_root, argparse.Namespace(model=None, model_effort=None))
+
+
+def test_resolve_runtime_config_requires_yaml_when_config_present(tmp_path: Path, monkeypatch):
+    import pytest
+
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    monkeypatch.setattr(superloop, "yaml", None)
+    monkeypatch.setattr(superloop, "superloop_repo_root", lambda: tmp_path / "global")
+    (workspace_root / "superloop.yaml").write_text("{}", encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="PyYAML"):
+        resolve_runtime_config(workspace_root, argparse.Namespace(model=None, model_effort=None))
+
+
+def test_resolve_runtime_config_rejects_unknown_provider_keys(tmp_path: Path, monkeypatch):
+    import pytest
+
+    install_fake_yaml(monkeypatch)
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    monkeypatch.setattr(superloop, "superloop_repo_root", lambda: tmp_path / "global")
+    write_superloop_config(
+        workspace_root / "superloop.yaml",
+        {"provider": {"temperature": "1"}},
+    )
+
+    with pytest.raises(ConfigError, match="unsupported provider keys"):
+        resolve_runtime_config(workspace_root, argparse.Namespace(model=None, model_effort=None))
+
+
+def test_resolve_runtime_config_rejects_unknown_top_level_keys(tmp_path: Path, monkeypatch):
+    import pytest
+
+    install_fake_yaml(monkeypatch)
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    monkeypatch.setattr(superloop, "superloop_repo_root", lambda: tmp_path / "global")
+    write_superloop_config(
+        workspace_root / "superloop.yaml",
+        {"unexpected": {"model": "gpt-test"}},
+    )
+
+    with pytest.raises(ConfigError, match="unsupported top-level keys"):
+        resolve_runtime_config(workspace_root, argparse.Namespace(model=None, model_effort=None))
+
+
+def test_resolve_runtime_config_rejects_malformed_yaml(tmp_path: Path, monkeypatch):
+    import pytest
+
+    install_fake_yaml(monkeypatch)
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    monkeypatch.setattr(superloop, "superloop_repo_root", lambda: tmp_path / "global")
+    (workspace_root / "superloop.yaml").write_text("{not-json", encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="could not be parsed as YAML"):
+        resolve_runtime_config(workspace_root, argparse.Namespace(model=None, model_effort=None))
+
+
+def test_resolve_codex_exec_command_includes_model_effort_when_supported(monkeypatch):
+    help_calls: list[list[str]] = []
+
+    def fake_run(cmd, capture_output, text, encoding):
+        help_calls.append(cmd)
+        if cmd == ["codex", "exec", "--help"]:
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                stdout="--json --full-auto --model-effort",
+                stderr="",
+            )
+        if cmd == ["codex", "exec", "resume", "--help"]:
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                stdout="--json --model-effort",
+                stderr="",
+            )
+        raise AssertionError(cmd)
+
+    monkeypatch.setattr(superloop.subprocess, "run", fake_run)
+
+    command = resolve_codex_exec_command(ProviderConfig(model="gpt-test", model_effort="high"))
+
+    assert help_calls == [
+        ["codex", "exec", "--help"],
+        ["codex", "exec", "resume", "--help"],
+    ]
+    assert "--model-effort" in command.start_command
+    assert "--model-effort" in command.resume_command
+    assert command.start_command[-1] == "-"
+
+
+def test_resolve_codex_exec_command_omits_model_effort_when_unset(monkeypatch):
+    def fake_run(cmd, capture_output, text, encoding):
+        if cmd == ["codex", "exec", "--help"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="--json --full-auto", stderr="")
+        if cmd == ["codex", "exec", "resume", "--help"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="--json", stderr="")
+        raise AssertionError(cmd)
+
+    monkeypatch.setattr(superloop.subprocess, "run", fake_run)
+
+    command = resolve_codex_exec_command(ProviderConfig(model="gpt-test"))
+
+    assert "--model-effort" not in command.start_command
+    assert "--model-effort" not in command.resume_command
+
+
+def test_resolve_codex_exec_command_rejects_unsupported_model_effort(monkeypatch):
+    import pytest
+
+    def fake_run(cmd, capture_output, text, encoding):
+        if cmd == ["codex", "exec", "--help"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="--json --full-auto", stderr="")
+        if cmd == ["codex", "exec", "resume", "--help"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="--json", stderr="")
+        raise AssertionError(cmd)
+
+    monkeypatch.setattr(superloop.subprocess, "run", fake_run)
+
+    with pytest.raises(SystemExit):
+        resolve_codex_exec_command(ProviderConfig(model="gpt-test", model_effort="high"))
+
+
+def test_main_resolves_provider_config_before_codex_command(tmp_path: Path, monkeypatch):
+    install_fake_yaml(monkeypatch)
+    workspace_root = tmp_path / "workspace"
+    global_root = tmp_path / "global"
+    workspace_root.mkdir()
+    global_root.mkdir()
+    monkeypatch.setattr(superloop, "superloop_repo_root", lambda: global_root)
+    write_superloop_config(
+        global_root / "superloop.yaml",
+        {"provider": {"model": "gpt-global", "model_effort": "medium"}},
+    )
+    write_superloop_config(
+        workspace_root / "superloop.config",
+        {"provider": {"model": "gpt-local"}},
+    )
+
+    captured: list[ProviderConfig] = []
+    control = superloop.LoopControl(
+        question=None,
+        promise=superloop.PROMISE_COMPLETE,
+        source="canonical",
+        raw_payload=None,
+    )
+
+    monkeypatch.setattr(superloop, "check_dependencies", lambda require_git=True: None)
+    monkeypatch.setattr(
+        superloop,
+        "resolve_codex_exec_command",
+        lambda provider: captured.append(provider) or fake_codex_command(),
+    )
+    monkeypatch.setattr(superloop, "run_codex_phase", lambda *args, **kwargs: "<loop-control></loop-control>")
+    monkeypatch.setattr(superloop, "parse_phase_control", lambda *args, **kwargs: control)
+    monkeypatch.setattr(superloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        superloop.sys,
+        "argv",
+        [
+            "superloop.py",
+            "--workspace",
+            str(workspace_root),
+            "--pairs",
+            "plan",
+            "--task-id",
+            "config-task",
+            "--max-iterations",
+            "1",
+            "--model-effort",
+            "high",
+            "--no-git",
+        ],
+    )
+
+    exit_code = superloop.main()
+
+    assert exit_code == 0
+    assert captured == [ProviderConfig(model="gpt-local", model_effort="high")]
 
 
 def test_create_run_paths_creates_per_run_artifacts(tmp_path: Path):

@@ -263,3 +263,67 @@ In other words:
           events.jsonl
           summary.md
           session.json
+
+## Configuration
+
+Superloop resolves provider settings from four layers, in this order:
+
+1. built-in defaults
+2. optional global config in the Superloop repo root
+3. optional local config in the target `--workspace` repo root
+4. explicit CLI flags
+
+Precedence is deterministic:
+
+`builtins < global config < local config < CLI`
+
+Supported config filenames at each layer:
+
+- `superloop.yaml`
+- `superloop.config`
+
+If both files exist in the same directory, Superloop fails fast instead of guessing which one to use.
+
+Both filenames use the same YAML schema:
+
+```yaml
+provider:
+  model: gpt-5.4
+  model_effort: medium
+runtime:
+  pairs: plan,implement,test
+  max_iterations: 15
+  phase_mode: single
+  intent_mode: preserve
+  full_auto_answers: false
+  no_git: false
+```
+
+Supported keys in this release:
+
+- `provider.model`
+- `provider.model_effort`
+- `runtime.pairs`
+- `runtime.max_iterations`
+- `runtime.phase_mode` (`single` or `up-to`)
+- `runtime.intent_mode` (`replace`, `append`, or `preserve`)
+- `runtime.full_auto_answers`
+- `runtime.no_git`
+
+Example local override:
+
+```yaml
+provider:
+  model: gpt-5.4-mini
+runtime:
+  max_iterations: 8
+  no_git: true
+```
+
+Example CLI override:
+
+```bash
+python superloop.py --workspace /path/to/repo --model gpt-5.4 --model-effort high
+```
+
+PyYAML is only required when Superloop needs to parse a config file or an explicit `phase_plan.yaml`.
