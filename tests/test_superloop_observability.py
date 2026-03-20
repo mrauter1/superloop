@@ -386,6 +386,16 @@ def test_verifier_scope_violations_ignores_superloop_artifacts():
     }
     assert verifier_scope_violations("implement", delta, task_root) == [".superloop/tasks/task-1/test/output.md"]
 
+
+def test_verifier_scope_violations_does_not_ignore_artifact_prefixed_files():
+    task_root = ".superloop/tasks/task-1"
+    delta = {
+        ".superloop/tasks/task-1/task.json.bak",
+        ".superloop/tasks/task-1/run_log.md.tmp",
+        ".superloop/tasks/task-1/runs-backup/log.jsonl",
+    }
+    assert verifier_scope_violations("implement", delta, task_root) == sorted(delta)
+
 def test_main_resume_refuses_terminal_run(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(superloop, "check_dependencies", lambda require_git=True: None)
     monkeypatch.setattr(superloop, "resolve_codex_exec_command", lambda model: fake_codex_command())

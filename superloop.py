@@ -517,14 +517,25 @@ def superloop_artifact_paths(task_root: str) -> List[str]:
     ]
 
 
+def is_superloop_artifact_path(path: str, task_root: str) -> bool:
+    """Returns whether a path is a Superloop-owned artifact."""
+    for artifact in superloop_artifact_paths(task_root):
+        if artifact.endswith("/"):
+            if path.startswith(artifact):
+                return True
+            continue
+        if path == artifact:
+            return True
+    return False
+
+
 def verifier_scope_violations(pair: str, verifier_delta: Set[str], task_root: str) -> List[str]:
     """Returns verifier writes that are outside its allowed scope and not orchestrator artifacts."""
     allowed = tuple(allowed_verifier_paths(pair, task_root))
-    superloop_artifacts = tuple(superloop_artifact_paths(task_root))
     return sorted(
         path
         for path in verifier_delta
-        if not path.startswith(allowed) and not path.startswith(superloop_artifacts)
+        if not path.startswith(allowed) and not is_superloop_artifact_path(path, task_root)
     )
 
 
