@@ -1,0 +1,4 @@
+<loop-control>
+{"schema":"docloop.loop_control/v1","kind":"promise","promise":"COMPLETE"}
+</loop-control>
+extra prose after the control block

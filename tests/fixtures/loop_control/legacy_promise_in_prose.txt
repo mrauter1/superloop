@@ -1,0 +1,2 @@
+The verifier mentioned <promise>COMPLETE</promise> as an example, but did not end with a control tag.
+More prose follows here.

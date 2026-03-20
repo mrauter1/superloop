@@ -1,0 +1,3 @@
+Thinking through the interface change.
+<question>Should the CLI support dry-run output?</question>
+<promise>INCOMPLETE</promise>
