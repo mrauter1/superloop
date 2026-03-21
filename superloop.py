@@ -67,6 +67,14 @@ RUNTIME_PHASE_STATUSES = {
     PHASE_STATUS_DEFERRED,
 }
 IMPLICIT_PHASE_ID = "implicit-phase"
+DEFAULT_CODEX_MODEL = "gpt-5.4"
+DEFAULT_PAIRS = "plan,implement,test"
+DEFAULT_MAX_ITERATIONS = 15
+DEFAULT_PHASE_MODE = PHASE_MODE_SINGLE
+DEFAULT_INTENT_MODE = "preserve"
+DEFAULT_FULL_AUTO_ANSWERS = False
+DEFAULT_NO_GIT = False
+SUPERLOOP_CONFIG_FILENAMES = ("superloop.yaml", "superloop.config")
 
 PAIR_CRITERIA_TEMPLATES = {
     "plan": """# Plan Verification Criteria
@@ -309,6 +317,50 @@ class CodexCommandConfig:
     resume_command: List[str]
 
 
+@dataclass(frozen=True)
+class ProviderConfig:
+    model: str
+    model_effort: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class ProviderConfigOverride:
+    model: Optional[str] = None
+    model_effort: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class RuntimeConfig:
+    pairs: str
+    max_iterations: int
+    phase_mode: str
+    intent_mode: str
+    full_auto_answers: bool
+    no_git: bool
+
+
+@dataclass(frozen=True)
+class RuntimeConfigOverride:
+    pairs: Optional[str] = None
+    max_iterations: Optional[int] = None
+    phase_mode: Optional[str] = None
+    intent_mode: Optional[str] = None
+    full_auto_answers: Optional[bool] = None
+    no_git: Optional[bool] = None
+
+
+@dataclass(frozen=True)
+class SuperloopConfigOverride:
+    provider: ProviderConfigOverride = ProviderConfigOverride()
+    runtime: RuntimeConfigOverride = RuntimeConfigOverride()
+
+
+@dataclass(frozen=True)
+class ResolvedSuperloopConfig:
+    provider: ProviderConfig
+    runtime: RuntimeConfig
+
+
 @dataclass
 class SessionState:
     mode: str
@@ -415,6 +467,10 @@ class PhasePlanError(ValueError):
     """Raised when phase-plan state is invalid or ambiguous."""
 
 
+class ConfigError(ValueError):
+    """Raised when Superloop configuration is invalid or cannot be loaded."""
+
+
 def fatal(message: str, exit_code: int = 1):
     print(message, file=sys.stderr)
     sys.exit(exit_code)
@@ -457,6 +513,221 @@ def parse_status_paths(status_text: str) -> Set[str]:
             continue
         changed.add(normalize_repo_path(line[3:]))
     return changed
+
+
+def superloop_repo_root() -> Path:
+    return Path(__file__).resolve().parent
+
+
+def discover_config_file(directory: Path) -> Optional[Path]:
+    matches: List[Path] = []
+    for filename in SUPERLOOP_CONFIG_FILENAMES:
+        candidate = directory / filename
+        if not candidate.exists():
+            continue
+        if not candidate.is_file():
+            raise ConfigError(f"Configuration path exists but is not a file: {candidate}")
+        matches.append(candidate)
+    if len(matches) > 1:
+        raise ConfigError(
+            f"Found multiple configuration files in {directory}: "
+            f"{', '.join(path.name for path in matches)}. Keep only one."
+        )
+    return matches[0] if matches else None
+
+
+def load_superloop_config(path: Path) -> object:
+    if yaml is None:
+        raise ConfigError(
+            f"{path} cannot be loaded without PyYAML installed. Install dependencies from requirements.txt."
+        )
+    try:
+        return yaml.safe_load(path.read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:
+        raise ConfigError(f"{path} could not be parsed as YAML: {exc}") from exc
+    except OSError as exc:
+        raise ConfigError(f"{path} could not be read: {exc}") from exc
+
+
+def _optional_config_string(raw_value: object, label: str, source: Path) -> Optional[str]:
+    if raw_value is None:
+        return None
+    if not isinstance(raw_value, str) or not raw_value.strip():
+        raise ConfigError(f"{source}: {label} must be a non-empty string when provided.")
+    return raw_value.strip()
+
+
+def _optional_config_int(raw_value: object, label: str, source: Path) -> Optional[int]:
+    if raw_value is None:
+        return None
+    if isinstance(raw_value, bool) or not isinstance(raw_value, int):
+        raise ConfigError(f"{source}: {label} must be an integer when provided.")
+    return raw_value
+
+
+def _optional_config_bool(raw_value: object, label: str, source: Path) -> Optional[bool]:
+    if raw_value is None:
+        return None
+    if not isinstance(raw_value, bool):
+        raise ConfigError(f"{source}: {label} must be a boolean when provided.")
+    return raw_value
+
+
+def _format_unknown_keys(keys: Iterable[object]) -> str:
+    return ", ".join(sorted(str(key) for key in keys))
+
+
+def parse_superloop_config(payload: object, source: Path) -> SuperloopConfigOverride:
+    if not isinstance(payload, dict):
+        raise ConfigError(f"{source}: configuration must be a YAML mapping.")
+
+    unknown_top_level = sorted(key for key in payload if key not in {"provider", "runtime"})
+    if unknown_top_level:
+        raise ConfigError(f"{source}: unsupported top-level keys: {_format_unknown_keys(unknown_top_level)}")
+
+    provider_payload = payload.get("provider")
+    if provider_payload is not None and not isinstance(provider_payload, dict):
+        raise ConfigError(f"{source}: provider must be a mapping.")
+    provider_payload = provider_payload or {}
+    unknown_provider_keys = sorted(key for key in provider_payload if key not in {"model", "model_effort"})
+    if unknown_provider_keys:
+        raise ConfigError(f"{source}: unsupported provider keys: {_format_unknown_keys(unknown_provider_keys)}")
+    provider = ProviderConfigOverride(
+        model=_optional_config_string(provider_payload.get("model"), "provider.model", source),
+        model_effort=_optional_config_string(provider_payload.get("model_effort"), "provider.model_effort", source),
+    )
+
+    runtime_payload = payload.get("runtime")
+    if runtime_payload is not None and not isinstance(runtime_payload, dict):
+        raise ConfigError(f"{source}: runtime must be a mapping.")
+    runtime_payload = runtime_payload or {}
+    unknown_runtime_keys = sorted(
+        key
+        for key in runtime_payload
+        if key not in {"pairs", "max_iterations", "phase_mode", "intent_mode", "full_auto_answers", "no_git"}
+    )
+    if unknown_runtime_keys:
+        raise ConfigError(f"{source}: unsupported runtime keys: {_format_unknown_keys(unknown_runtime_keys)}")
+    phase_mode = _optional_config_string(runtime_payload.get("phase_mode"), "runtime.phase_mode", source)
+    if phase_mode is not None and phase_mode not in {PHASE_MODE_SINGLE, PHASE_MODE_UP_TO}:
+        raise ConfigError(f"{source}: runtime.phase_mode must be one of: {PHASE_MODE_SINGLE}, {PHASE_MODE_UP_TO}.")
+    intent_mode = _optional_config_string(runtime_payload.get("intent_mode"), "runtime.intent_mode", source)
+    if intent_mode is not None and intent_mode not in {"replace", "append", "preserve"}:
+        raise ConfigError(f"{source}: runtime.intent_mode must be one of: replace, append, preserve.")
+    runtime = RuntimeConfigOverride(
+        pairs=_optional_config_string(runtime_payload.get("pairs"), "runtime.pairs", source),
+        max_iterations=_optional_config_int(runtime_payload.get("max_iterations"), "runtime.max_iterations", source),
+        phase_mode=phase_mode,
+        intent_mode=intent_mode,
+        full_auto_answers=_optional_config_bool(runtime_payload.get("full_auto_answers"), "runtime.full_auto_answers", source),
+        no_git=_optional_config_bool(runtime_payload.get("no_git"), "runtime.no_git", source),
+    )
+
+    return SuperloopConfigOverride(
+        provider=provider,
+        runtime=runtime,
+    )
+
+
+def _merge_provider_config(
+    *layers: ProviderConfigOverride,
+    cli_model: Optional[str],
+    cli_model_effort: Optional[str],
+) -> ProviderConfig:
+    model = DEFAULT_CODEX_MODEL
+    model_effort: Optional[str] = None
+
+    for layer in layers:
+        if layer.model is not None:
+            model = layer.model
+        if layer.model_effort is not None:
+            model_effort = layer.model_effort
+
+    if cli_model is not None:
+        model = cli_model
+    if cli_model_effort is not None:
+        model_effort = cli_model_effort
+
+    return ProviderConfig(model=model, model_effort=model_effort)
+
+
+def _merge_runtime_config(*layers: RuntimeConfigOverride, args: argparse.Namespace) -> RuntimeConfig:
+    pairs = DEFAULT_PAIRS
+    max_iterations = DEFAULT_MAX_ITERATIONS
+    phase_mode = DEFAULT_PHASE_MODE
+    intent_mode = DEFAULT_INTENT_MODE
+    full_auto_answers = DEFAULT_FULL_AUTO_ANSWERS
+    no_git = DEFAULT_NO_GIT
+
+    for layer in layers:
+        if layer.pairs is not None:
+            pairs = layer.pairs
+        if layer.max_iterations is not None:
+            max_iterations = layer.max_iterations
+        if layer.phase_mode is not None:
+            phase_mode = layer.phase_mode
+        if layer.intent_mode is not None:
+            intent_mode = layer.intent_mode
+        if layer.full_auto_answers is not None:
+            full_auto_answers = layer.full_auto_answers
+        if layer.no_git is not None:
+            no_git = layer.no_git
+
+    if getattr(args, "pairs", None) is not None:
+        pairs = args.pairs
+    if getattr(args, "max_iterations", None) is not None:
+        max_iterations = args.max_iterations
+    if getattr(args, "phase_mode", None) is not None:
+        phase_mode = args.phase_mode
+    if getattr(args, "intent_mode", None) is not None:
+        intent_mode = args.intent_mode
+    if getattr(args, "full_auto_answers", None) is not None:
+        full_auto_answers = args.full_auto_answers
+    if getattr(args, "no_git", None) is not None:
+        no_git = args.no_git
+
+    if max_iterations < 1:
+        raise ConfigError("runtime.max_iterations must be >= 1.")
+
+    return RuntimeConfig(
+        pairs=pairs,
+        max_iterations=max_iterations,
+        phase_mode=phase_mode,
+        intent_mode=intent_mode,
+        full_auto_answers=full_auto_answers,
+        no_git=no_git,
+    )
+
+
+def resolve_runtime_config(root: Path, args: argparse.Namespace) -> ResolvedSuperloopConfig:
+    program_root = superloop_repo_root()
+    global_config_path = discover_config_file(program_root)
+    local_config_path = discover_config_file(root) if root != program_root else None
+
+    global_override = (
+        parse_superloop_config(load_superloop_config(global_config_path), global_config_path)
+        if global_config_path is not None
+        else SuperloopConfigOverride()
+    )
+    local_override = (
+        parse_superloop_config(load_superloop_config(local_config_path), local_config_path)
+        if local_config_path is not None
+        else SuperloopConfigOverride()
+    )
+
+    return ResolvedSuperloopConfig(
+        provider=_merge_provider_config(
+            global_override.provider,
+            local_override.provider,
+            cli_model=args.model,
+            cli_model_effort=args.model_effort,
+        ),
+        runtime=_merge_runtime_config(
+            global_override.runtime,
+            local_override.runtime,
+            args=args,
+        ),
+    )
 
 
 
@@ -1154,7 +1425,12 @@ def check_dependencies(require_git: bool = True):
         fatal(f"[!] FATAL: Missing required dependencies: {', '.join(missing)}")
 
 
-def resolve_codex_exec_command(model: str) -> CodexCommandConfig:
+def resolve_codex_exec_command(provider: ProviderConfig | str) -> CodexCommandConfig:
+    if isinstance(provider, str):
+        provider = ProviderConfig(model=provider)
+    model = provider.model
+    model_effort = provider.model_effort
+
     help_result = subprocess.run(
         ["codex", "exec", "--help"],
         capture_output=True,
@@ -1169,6 +1445,7 @@ def resolve_codex_exec_command(model: str) -> CodexCommandConfig:
     supports_bypass = "--dangerously-bypass-approvals-and-sandbox" in help_text
     supports_full_auto = "--full-auto" in help_text
     supports_json = "--json" in help_text
+    supports_model_effort = "--model-effort" in help_text
     resume_help = subprocess.run(
         ["codex", "exec", "resume", "--help"],
         capture_output=True,
@@ -1180,9 +1457,19 @@ def resolve_codex_exec_command(model: str) -> CodexCommandConfig:
         fatal(f"[!] FATAL CODEX ERROR: {details}")
     resume_text = f"{resume_help.stdout}\n{resume_help.stderr}"
     supports_resume_json = "--json" in resume_text
+    supports_resume_model_effort = "--model-effort" in resume_text
 
     if not supports_json or not supports_resume_json:
         fatal("[!] FATAL CODEX ERROR: This Superloop version requires `codex exec` and `codex exec resume` support for --json.")
+
+    provider_args = ["--model", model]
+    if model_effort is not None:
+        if not supports_model_effort or not supports_resume_model_effort:
+            fatal(
+                "[!] FATAL CODEX ERROR: Configured model_effort requires `codex exec` and "
+                "`codex exec resume` support for --model-effort."
+            )
+        provider_args.extend(["--model-effort", model_effort])
 
     if supports_bypass:
         return CodexCommandConfig(
@@ -1191,8 +1478,7 @@ def resolve_codex_exec_command(model: str) -> CodexCommandConfig:
                 "exec",
                 "--json",
                 "--dangerously-bypass-approvals-and-sandbox",
-                "--model",
-                model,
+                *provider_args,
                 "-",
             ],
             resume_command=[
@@ -1201,8 +1487,7 @@ def resolve_codex_exec_command(model: str) -> CodexCommandConfig:
                 "resume",
                 "--json",
                 "--dangerously-bypass-approvals-and-sandbox",
-                "--model",
-                model,
+                *provider_args,
             ],
         )
 
@@ -1213,8 +1498,7 @@ def resolve_codex_exec_command(model: str) -> CodexCommandConfig:
                 "exec",
                 "--json",
                 "--full-auto",
-                "--model",
-                model,
+                *provider_args,
                 "-",
             ],
             resume_command=[
@@ -1223,8 +1507,7 @@ def resolve_codex_exec_command(model: str) -> CodexCommandConfig:
                 "resume",
                 "--json",
                 "--full-auto",
-                "--model",
-                model,
+                *provider_args,
             ],
         )
 
@@ -2526,34 +2809,42 @@ def execute_pair_cycles(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Superloop: optional strategy-to-execution Codex loop orchestration")
-    parser.add_argument("--pairs", type=str, default="plan,implement,test", help="Comma list from: plan,implement,test")
+    parser.add_argument("--pairs", type=str, default=None, help="Comma list from: plan,implement,test")
     parser.add_argument("--phase-id", type=str, help="Explicit phase id for implement/test execution when phase_plan.yaml exists")
     parser.add_argument(
         "--phase-mode",
         choices=[PHASE_MODE_SINGLE, PHASE_MODE_UP_TO],
-        default=PHASE_MODE_SINGLE,
+        default=None,
         help="Phase targeting mode for implement/test execution",
     )
-    parser.add_argument("--max-iterations", type=int, default=15, help="Maximum verifier cycles per enabled pair")
-    parser.add_argument("--model", type=str, default="gpt-5.4", help="Codex model")
+    parser.add_argument("--max-iterations", type=int, default=None, help="Maximum verifier cycles per enabled pair")
+    parser.add_argument("--model", type=str, default=None, help="Codex model override")
+    parser.add_argument("--model-effort", type=str, default=None, help="Codex model effort override")
     parser.add_argument("--workspace", type=str, default=".", help="Repository/workspace root")
     parser.add_argument("--intent", type=str, help="Optional initial product intent text")
     parser.add_argument("--task-id", type=str, help="Task workspace id/slug under .superloop/tasks")
     parser.add_argument(
         "--intent-mode",
         choices=["replace", "append", "preserve"],
-        default="preserve",
+        default=None,
         help="How --intent updates an existing task context",
     )
     parser.add_argument("--resume", action="store_true", help="Resume from an existing task/run state")
     parser.add_argument("--run-id", type=str, help="Run ID under .superloop/tasks/<task-id>/runs")
     parser.add_argument("--list-tasks", action="store_true", help="List existing .superloop task IDs and exit")
-    parser.add_argument("--full-auto-answers", action="store_true", help="Auto-answer agent questions using an extra Codex pass")
-    parser.add_argument("--no-git", action="store_true", help="Do not initialize git or create git commits/checkpoints")
+    parser.add_argument(
+        "--full-auto-answers",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Auto-answer agent questions using an extra Codex pass",
+    )
+    parser.add_argument(
+        "--no-git",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Do not initialize git or create git commits/checkpoints",
+    )
     args = parser.parse_args()
-
-    if args.max_iterations < 1:
-        fatal("[!] FATAL: --max-iterations must be >= 1")
 
     root = Path(args.workspace).expanduser().resolve()
     if not root.exists() or not root.is_dir():
@@ -2568,10 +2859,7 @@ def main() -> int:
             print("(no tasks found)")
         return 0
 
-    use_git = not args.no_git
     tasks_dir = root / ".superloop" / "tasks"
-    if args.run_id and not args.resume:
-        fatal("[!] FATAL: --run-id requires --resume.")
 
     if args.resume:
         if args.task_id:
@@ -2593,11 +2881,24 @@ def main() -> int:
     recorder: Optional[EventRecorder] = None
     run_status = "setup"
     exit_code = 1
+    try:
+        runtime_config = resolve_runtime_config(root, args)
+    except ConfigError as exc:
+        fatal(f"[!] FATAL CONFIG ERROR: {exc}")
+    args.pairs = runtime_config.runtime.pairs
+    args.max_iterations = runtime_config.runtime.max_iterations
+    args.phase_mode = runtime_config.runtime.phase_mode
+    args.intent_mode = runtime_config.runtime.intent_mode
+    args.full_auto_answers = runtime_config.runtime.full_auto_answers
+    args.no_git = runtime_config.runtime.no_git
+    use_git = not args.no_git
     if use_git and not shutil.which("git"):
         warn("git is not installed; forcing --no-git mode.")
         use_git = False
     check_dependencies(require_git=use_git)
-    codex_command = resolve_codex_exec_command(args.model)
+    if args.run_id and not args.resume:
+        fatal("[!] FATAL: --run-id requires --resume.")
+    codex_command = resolve_codex_exec_command(runtime_config.provider)
     pair_configs = parse_pairs(args.pairs, args.max_iterations)
     enabled_pairs = [p.name for p in pair_configs if p.enabled]
 
