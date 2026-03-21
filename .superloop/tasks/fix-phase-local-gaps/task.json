@@ -1,0 +1,43 @@
+{
+  "task_id": "fix-phase-local-gaps",
+  "created_at": "2026-03-21T17:51:54.317953+00:00",
+  "request_text": "PRD Follow-up: Fix remaining phase-local contract gaps in Superloop\n\nObjectives\n1) Remove runtime fallback/alias semantics that imply legacy run-level session.json.\n2) Correct fresh-phase bootstrap extraction so prior phase status and prior artifact paths are accurate and repo-relative.\n3) Add explicit bootstrap size cap/error behavior.\n4) Remove volatile generated .superloop task-run artifacts from source diffs or treat as deterministic fixtures only.\n\nScope\n- Update superloop.py runtime helpers and prompt context plumbing.\n- Update tests/test_phase_local_behavior.py and tests/test_superloop_observability.py to lock behavior.\n- Update Readme.md if needed for strict scoped-session behavior language.\n- Keep CLI surface unchanged.\n\nRequired changes\nA. Session strictness\n- Remove returned run_paths alias key `session_file`; keep `plan_session_file` and `sessions_dir` only.\n- Require explicit `session_file` in build_phase_prompt() and remove cwd/session.json fallback.\n- Add regression assertion that no prompt preamble can surface legacy session.json.\n\nB. Fresh bootstrap correctness\n- prior_phase_status_lines(...) should derive statuses for prior phases in current run (not only active phase id).\n- relevant_prior_artifact_paths(...) should produce repo-relative paths rooted at .superloop/tasks/<task-id>/...\n- Ensure bootstrap sections remain:\n  INITIAL REQUEST SNAPSHOT\n  AUTHORITATIVE CLARIFICATIONS TO DATE\n  PRIOR PHASE STATUS IN THIS RUN\n  RELEVANT PRIOR PHASE ARTIFACT PATHS\n  ACTIVE PHASE EXECUTION CONTRACT\n  ACTIVE PHASE ARTIFACTS\n\nC. Bootstrap size cap\n- Add conservative max bootstrap size constant.\n- If exceeded, fail with clear actionable error. No silent truncation.\n\nD. Repository hygiene\n- Stop committing volatile task runtime outputs under .superloop/tasks/*/runs/* in code-focused changes.\n- If any artifacts are needed for tests, move minimal deterministic samples to tests/fixtures.\n\nTesting requirements\n- Run focused tests:\n  PYTHONPATH=/workspace/superloop pytest -q tests/test_phase_local_behavior.py tests/test_superloop_observability.py\n- Run full tests if feasible:\n  PYTHONPATH=/workspace/superloop pytest -q\n\nCompletion criteria\n- Plan, implement, and test pairs all COMPLETE for this task run.\n- Event log ends with run_finished status=success.",
+  "request_updated_at": "2026-03-21T17:52:33.633863+00:00",
+  "phase_plan_path": "/workspace/superloop/.superloop/tasks/fix-phase-local-gaps/plan/phase_plan.yaml",
+  "phase_plan_version": 1,
+  "active_phase_selection": {
+    "run_id": "run-20260321T180746Z-6bd1961f",
+    "mode": "single",
+    "phase_ids": [
+      "preserve-phase-local-contract-and-close-run-hygiene"
+    ],
+    "explicit": true,
+    "current_phase_index": 1,
+    "current_phase_id": null
+  },
+  "phase_status": {
+    "strict-phase-local-gap-closure": "in_progress",
+    "preserve-phase-local-contract-and-close-run-hygiene": "completed"
+  },
+  "phase_history": [
+    {
+      "phase_id": "strict-phase-local-gap-closure",
+      "run_id": "run-20260321T175756Z-cc3fab18",
+      "status": "in_progress",
+      "ts": "2026-03-21T17:59:38.511654+00:00"
+    },
+    {
+      "phase_id": "preserve-phase-local-contract-and-close-run-hygiene",
+      "run_id": "run-20260321T180746Z-6bd1961f",
+      "status": "in_progress",
+      "ts": "2026-03-21T18:09:20.052507+00:00"
+    },
+    {
+      "phase_id": "preserve-phase-local-contract-and-close-run-hygiene",
+      "run_id": "run-20260321T180746Z-6bd1961f",
+      "status": "completed",
+      "ts": "2026-03-21T18:14:29.030011+00:00",
+      "pair": "test"
+    }
+  ]
+}

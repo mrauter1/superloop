@@ -1,0 +1,55 @@
+version: 1
+task_id: fix-phase-local-gaps
+request_snapshot_ref: .superloop/tasks/fix-phase-local-gaps/runs/run-20260321T180746Z-6bd1961f/request.md
+phases:
+  - phase_id: preserve-phase-local-contract-and-close-run-hygiene
+    title: Preserve strict phase-local behavior and close remaining run-artifact hygiene
+    objective: >-
+      Keep the already-landed strict scoped-session and fresh-bootstrap
+      contract intact, then close the remaining gap where snapshot-delta commit
+      paths can still stage volatile .superloop task run artifacts during normal
+      code-focused commits.
+    in_scope:
+      - Preserve the existing run-path contract where helpers expose `plan_session_file` and `sessions_dir` without a `session_file` alias.
+      - Preserve the explicit `session_file` requirement in `build_phase_prompt(...)` and prevent any reintroduction of legacy `session.json` fallback semantics.
+      - "Preserve the current fresh bootstrap contract: explicit prior-phase inputs, six required sections in order, repo-relative prior artifact paths, and explicit size-cap failure behavior."
+      - Audit and fix code-focused commit call sites that use snapshot diffs so `.superloop/tasks/*/runs/*` cannot be staged through `producer_delta`, `verifier_delta`, or pair-complete/blocked commit flows.
+      - Add or update focused regressions so mixed diff sets keep legitimate edits while excluding volatile run-artifact paths.
+      - Update `.gitignore` only if secondary local-noise suppression is still useful after the runtime commit filtering is correct.
+      - Preserve the current README wording unless implementation reveals drift from the scoped-session contract.
+    out_of_scope:
+      - New CLI flags, config knobs, or runtime modes.
+      - Broad cleanup of historical tracked run outputs unrelated to this request.
+      - Bootstrap redesign, truncation, or lossy summarization logic.
+      - Depending on live task run outputs for tests instead of `tmp_path` or deterministic fixtures.
+    future_phase_deferments:
+      - Any separate repository-history cleanup of older committed run artifacts that are outside this task's code changes.
+      - Migration of already-generated historical prompt/run files that still contain old wording but are not part of the active runtime path.
+    dependencies: []
+    acceptance_criteria:
+      - id: AC-1
+        text: "`create_run_paths(...)` and `open_existing_run_paths(...)` continue to expose scoped session paths without a `session_file` alias, and in-repo callers/tests continue to use `plan_session_file` or explicit phase-session resolution."
+      - id: AC-2
+        text: "`build_phase_prompt(...)` continues to require an explicit scoped `session_file`, and prompt preambles/bootstrap content do not surface a legacy `session.json` path."
+      - id: AC-3
+        text: "Fresh bootstrap behavior remains correct: prior status lines use earlier phases in the current run, prior artifact paths are repo-relative under `.superloop/tasks/<task-id>/...`, the six required sections remain in order, and the size cap still fails explicitly without truncation."
+      - id: AC-4
+        text: "Normal code-focused commit paths exclude `.superloop/tasks/*/runs/*` not only via `tracked_superloop_paths(...)` but also when commit inputs come from snapshot-delta path sets."
+      - id: AC-5
+        text: "Focused regressions cover the preserved strict session/bootstrap contract and the snapshot-delta run-artifact filtering behavior."
+      - id: AC-6
+        text: "The focused test suite passes, and the full test suite is run if feasible."
+    deliverables:
+      - Updated implementation-ready plan aligned to the current working-tree contract
+      - Runtime hygiene changes, if needed, that prevent volatile run artifacts from entering code-focused commits through snapshot deltas
+      - Focused regression coverage for preserved phase-local behavior and end-to-end run-artifact filtering
+    risks:
+      - Snapshot-delta filtering may still miss run artifacts if the implementation only updates tracked-path helpers.
+      - Over-broad filtering could omit legitimate phase artifacts or real source edits from commits.
+      - Secondary `.gitignore` changes can reduce local noise but are insufficient if treated as the primary fix.
+      - Existing dirty generated run directories can create review noise if they are accidentally absorbed into scope.
+      - The worktree already contains generated run outputs from prior runs and a user-modified `.gitignore`, so implementation must avoid treating those unrelated dirty files as part of the requested code change.
+    rollback:
+      - Revert any new commit-path filtering together with its regressions if it suppresses legitimate edits.
+      - Revert secondary `.gitignore` changes independently if they prove too broad while keeping the runtime filtering fix.
+    status: planned
