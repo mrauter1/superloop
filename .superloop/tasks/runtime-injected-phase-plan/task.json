@@ -1,0 +1,36 @@
+{
+  "task_id": "runtime-injected-phase-plan",
+  "created_at": "2026-03-21T22:39:42.197944+00:00",
+  "request_text": "# Plan: Runtime-injected phase_plan metadata and phases-only planner authoring\n\n## Goal\nMake `phase_plan.yaml` metadata deterministic and runtime-owned while keeping planner-authored content focused on `phases`.\n\n## Scope\n1. Runtime-generate a `phase_plan.yaml` scaffold with authoritative metadata:\n   - `version` from `PHASE_PLAN_VERSION`\n   - `task_id` from current task metadata\n   - `request_snapshot_ref` from authoritative request snapshot pointer\n2. Planner prompt changes:\n   - Instruct planner to author/update `phases` only.\n   - Explicitly forbid editing runtime-owned metadata keys.\n3. Validation behavior changes:\n   - Keep `in_scope` and `deliverables` required and non-empty.\n   - Treat `out_of_scope`, `dependencies`, `acceptance_criteria`, `risks`, `rollback` as optional keys defaulting to empty lists when absent.\n4. Verifier prompt changes:\n   - Add a blocking check when runtime-owned metadata keys are altered incorrectly.\n5. Add tests covering scaffolding, metadata immutability, and optional-list behavior.\n\n## Deliverables\n- Updated orchestration logic in `superloop.py` to create/preserve metadata scaffold.\n- Updated planner/verifier prompt text in `superloop.py`.\n- Updated validator behavior for optional list fields.\n- Regression tests in `tests/test_phase_local_behavior.py` and/or related test files.",
+  "request_updated_at": "2026-03-21T22:40:00.095745+00:00",
+  "phase_plan_path": "/workspace/superloop/.superloop/tasks/runtime-injected-phase-plan/plan/phase_plan.yaml",
+  "phase_plan_version": 1,
+  "active_phase_selection": {
+    "run_id": "run-20260321T224717Z-6b1e5ee6",
+    "mode": "single",
+    "phase_ids": [
+      "runtime-owned-phase-plan-contract"
+    ],
+    "explicit": true,
+    "current_phase_index": 1,
+    "current_phase_id": null
+  },
+  "phase_status": {
+    "runtime-owned-phase-plan-contract": "completed"
+  },
+  "phase_history": [
+    {
+      "phase_id": "runtime-owned-phase-plan-contract",
+      "run_id": "run-20260321T224447Z-63db2a9d",
+      "status": "in_progress",
+      "ts": "2026-03-21T22:44:47.256377+00:00"
+    },
+    {
+      "phase_id": "runtime-owned-phase-plan-contract",
+      "run_id": "run-20260321T224717Z-6b1e5ee6",
+      "status": "completed",
+      "ts": "2026-03-21T22:52:22.013096+00:00",
+      "pair": "test"
+    }
+  ]
+}

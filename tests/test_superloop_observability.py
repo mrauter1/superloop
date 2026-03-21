@@ -20,7 +20,9 @@ from superloop import (
     create_run_paths,
     discover_config_file,
     derive_intent_task_id,
+    ensure_phase_plan_scaffold,
     ensure_workspace,
+    execute_pair_cycles,
     latest_run_id,
     latest_task_id,
     load_resume_checkpoint,
@@ -33,6 +35,7 @@ from superloop import (
     resolve_phase_selection,
     resolve_codex_exec_command,
     restore_phase_selection,
+    PairConfig,
     SessionState,
     task_request_text,
     task_id_for_run,
@@ -389,15 +392,39 @@ def test_main_resolves_provider_config_before_codex_command(tmp_path: Path, monk
 def test_create_run_paths_creates_per_run_artifacts(tmp_path: Path):
     run_paths = create_run_paths(tmp_path, "run-test-123", "Implement feature X")
 
+    assert "session_file" not in run_paths
     assert run_paths["run_dir"].is_dir()
     assert run_paths["run_log"].exists()
     assert run_paths["raw_phase_log"].exists()
     assert run_paths["events_file"].exists()
     assert run_paths["summary_file"].parent == run_paths["run_dir"]
     assert run_paths["request_file"].read_text(encoding="utf-8").strip() == "Implement feature X"
-    session_payload = json.loads(run_paths["session_file"].read_text(encoding="utf-8"))
+    session_payload = json.loads(run_paths["plan_session_file"].read_text(encoding="utf-8"))
     assert session_payload["mode"] == "persistent"
     assert session_payload["thread_id"] is None
+
+
+def test_ensure_phase_plan_scaffold_writes_runtime_metadata_after_request_snapshot_exists(tmp_path: Path, monkeypatch):
+    install_fake_yaml(monkeypatch)
+    paths = ensure_workspace(
+        root=tmp_path,
+        task_id="phase-plan-task",
+        product_intent="Implement feature X",
+        intent_mode="replace",
+    )
+    assert not phase_plan_file(paths["task_dir"]).exists()
+
+    run_paths = create_run_paths(paths["runs_dir"], "run-test-123", "Implement feature X")
+    plan_path = ensure_phase_plan_scaffold(paths["task_dir"], "phase-plan-task", run_paths["request_file"])
+
+    assert plan_path == phase_plan_file(paths["task_dir"])
+    payload = json.loads(plan_path.read_text(encoding="utf-8"))
+    assert payload == {
+        "version": superloop.PHASE_PLAN_VERSION,
+        "task_id": "phase-plan-task",
+        "request_snapshot_ref": str(run_paths["request_file"]),
+        "phases": [],
+    }
 
 
 def test_open_existing_run_paths_reuses_existing_artifacts(tmp_path: Path):
@@ -523,6 +550,120 @@ def test_validate_phase_plan_rejects_duplicate_phase_ids_after_normalization():
                 ],
             },
             "dup-phase-task",
+        )
+
+
+def test_validate_phase_plan_defaults_optional_lists_when_omitted():
+    plan = superloop.validate_phase_plan(
+        {
+            "version": 1,
+            "task_id": "optional-phase-task",
+            "request_snapshot_ref": "request.md",
+            "phases": [
+                {
+                    "phase_id": "phase-1",
+                    "title": "Phase 1",
+                    "objective": "First",
+                    "in_scope": ["first"],
+                    "deliverables": ["code"],
+                    "status": "planned",
+                }
+            ],
+        },
+        "optional-phase-task",
+    )
+
+    phase = plan.phases[0]
+    assert phase.out_of_scope == ()
+    assert phase.dependencies == ()
+    assert phase.acceptance_criteria == ()
+    assert phase.risks == ()
+    assert phase.rollback == ()
+
+
+def test_validate_phase_plan_still_rejects_missing_required_lists():
+    import pytest
+
+    with pytest.raises(superloop.PhasePlanError, match=r"phases\[1\]\.in_scope must be a list\."):
+        superloop.validate_phase_plan(
+            {
+                "version": 1,
+                "task_id": "required-phase-task",
+                "request_snapshot_ref": "request.md",
+                "phases": [
+                    {
+                        "phase_id": "phase-1",
+                        "title": "Phase 1",
+                        "objective": "First",
+                        "deliverables": ["code"],
+                        "status": "planned",
+                    }
+                ],
+            },
+            "required-phase-task",
+        )
+
+    with pytest.raises(superloop.PhasePlanError, match=r"phases\[1\]\.deliverables must be a list\."):
+        superloop.validate_phase_plan(
+            {
+                "version": 1,
+                "task_id": "required-phase-task",
+                "request_snapshot_ref": "request.md",
+                "phases": [
+                    {
+                        "phase_id": "phase-1",
+                        "title": "Phase 1",
+                        "objective": "First",
+                        "in_scope": ["first"],
+                        "status": "planned",
+                    }
+                ],
+            },
+            "required-phase-task",
+        )
+
+
+def test_validate_phase_plan_still_requires_non_empty_required_lists():
+    import pytest
+
+    with pytest.raises(superloop.PhasePlanError, match=r"phases\[1\]\.deliverables must be a non-empty list\."):
+        superloop.validate_phase_plan(
+            {
+                "version": 1,
+                "task_id": "required-phase-task",
+                "request_snapshot_ref": "request.md",
+                "phases": [
+                    {
+                        "phase_id": "phase-1",
+                        "title": "Phase 1",
+                        "objective": "First",
+                        "in_scope": ["first"],
+                        "deliverables": [],
+                        "status": "planned",
+                    }
+                ],
+            },
+            "required-phase-task",
+        )
+
+    with pytest.raises(superloop.PhasePlanError, match=r"phases\[1\]\.in_scope must be a non-empty list\."):
+        superloop.validate_phase_plan(
+            {
+                "version": 1,
+                "task_id": "required-phase-task",
+                "request_snapshot_ref": "request.md",
+                "phases": [
+                    {
+                        "phase_id": "phase-1",
+                        "title": "Phase 1",
+                        "objective": "First",
+                        "in_scope": [],
+                        "deliverables": ["code"],
+                        "status": "planned",
+                    }
+                ],
+            },
+            "required-phase-task",
         )
 
 
@@ -861,6 +1002,74 @@ def test_ensure_workspace_creates_task_scoped_paths_and_task_prompts(tmp_path: P
     assert ".superloop/tasks/my-task/plan/phase_plan.yaml" in plan_prompt
     assert ".superloop/plan/plan.md" not in plan_prompt
     assert ".superloop/context.md" not in plan_prompt
+    assert "authoring the `phases` payload only" in plan_prompt
+    assert "Do not edit or replace `version`, `task_id`, or `request_snapshot_ref`" in plan_prompt
+
+    plan_verifier_prompt = (task_dir / "plan" / "verifier_prompt.md").read_text(encoding="utf-8")
+    assert "incorrect runtime-owned `phase_plan.yaml` metadata" in plan_verifier_prompt
+
+    implement_prompt = (task_dir / "implement" / "prompt.md").read_text(encoding="utf-8")
+    assert ".superloop/tasks/my-task/implement/phases/<phase-dir-key>/feedback.md" in implement_prompt
+    assert ".superloop/tasks/my-task/implement/phases/<phase-dir-key>/implementation_notes.md" in implement_prompt
+    assert ".superloop/tasks/my-task/implement/feedback.md" not in implement_prompt
+    assert ".superloop/tasks/my-task/implement/implementation_notes.md" not in implement_prompt
+
+    implement_verifier_prompt = (task_dir / "implement" / "verifier_prompt.md").read_text(encoding="utf-8")
+    assert ".superloop/tasks/my-task/implement/phases/<phase-dir-key>/criteria.md" in implement_verifier_prompt
+    assert ".superloop/tasks/my-task/implement/phases/<phase-dir-key>/feedback.md" in implement_verifier_prompt
+    assert ".superloop/tasks/my-task/implement/criteria.md" not in implement_verifier_prompt
+    assert ".superloop/tasks/my-task/implement/feedback.md" not in implement_verifier_prompt
+
+    test_prompt = (task_dir / "test" / "prompt.md").read_text(encoding="utf-8")
+    assert ".superloop/tasks/my-task/test/phases/<phase-dir-key>/test_strategy.md" in test_prompt
+    assert ".superloop/tasks/my-task/test/phases/<phase-dir-key>/feedback.md" in test_prompt
+    assert ".superloop/tasks/my-task/test/test_strategy.md" not in test_prompt
+    assert ".superloop/tasks/my-task/test/feedback.md" not in test_prompt
+
+    test_verifier_prompt = (task_dir / "test" / "verifier_prompt.md").read_text(encoding="utf-8")
+    assert ".superloop/tasks/my-task/test/phases/<phase-dir-key>/criteria.md" in test_verifier_prompt
+    assert ".superloop/tasks/my-task/test/phases/<phase-dir-key>/feedback.md" in test_verifier_prompt
+    assert ".superloop/tasks/my-task/test/criteria.md" not in test_verifier_prompt
+    assert ".superloop/tasks/my-task/test/feedback.md" not in test_verifier_prompt
+
+
+def test_ensure_phase_plan_scaffold_restores_runtime_metadata_and_preserves_phases(tmp_path: Path, monkeypatch):
+    install_fake_yaml(monkeypatch)
+    task_dir = tmp_path / ".superloop" / "tasks" / "phase-plan-task"
+    (task_dir / "plan").mkdir(parents=True)
+    original_phases = [
+        {
+            "phase_id": "phase-1",
+            "title": "Phase 1",
+            "objective": "Build phase one",
+            "in_scope": ["Implement phase one"],
+            "deliverables": ["code"],
+            "status": "planned",
+        }
+    ]
+    phase_plan_file(task_dir).write_text(
+        json.dumps(
+            {
+                "version": 999,
+                "task_id": "wrong-task",
+                "request_snapshot_ref": "wrong-request.md",
+                "phases": original_phases,
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    request_file = tmp_path / "request.md"
+    request_file.write_text("Implement feature X\n", encoding="utf-8")
+
+    plan_path = ensure_phase_plan_scaffold(task_dir, "phase-plan-task", request_file)
+
+    payload = json.loads(plan_path.read_text(encoding="utf-8"))
+    assert payload["version"] == superloop.PHASE_PLAN_VERSION
+    assert payload["task_id"] == "phase-plan-task"
+    assert payload["request_snapshot_ref"] == str(request_file)
+    assert payload["phases"] == original_phases
 
 
 def test_load_phase_plan_and_resolve_selection(tmp_path: Path, monkeypatch):
@@ -959,11 +1168,290 @@ def test_build_phase_prompt_includes_active_phase_contract(tmp_path: Path):
         ),
         include_request_snapshot=True,
         active_phase_selection=selection,
+        session_file=tmp_path / "runs" / "run-1" / "sessions" / "phases" / "phase-1.json",
     )
 
     assert "ACTIVE PHASE EXECUTION CONTRACT:" in prompt
     assert "phase_ids: phase-1" in prompt
     assert "Phase phase-1: Phase 1" in prompt
+    assert "AUTHORITATIVE ACTIVE SESSION FILE: " in prompt
+    assert "sessions/phases/phase-1.json" in prompt
+    assert "session.json" not in prompt
+
+
+def test_build_phase_prompt_requires_explicit_session_file(tmp_path: Path):
+    import pytest
+
+    prompt_file = tmp_path / "prompt.md"
+    prompt_file.write_text("Prompt body\n", encoding="utf-8")
+    request_file = tmp_path / "request.md"
+    request_file.write_text("Implement feature X\n", encoding="utf-8")
+
+    with pytest.raises(TypeError):
+        build_phase_prompt(
+            cwd=tmp_path,
+            prompt_file=prompt_file,
+            request_file=request_file,
+            run_raw_phase_log=tmp_path / "raw_phase_log.md",
+            pair_name="plan",
+            phase_name="producer",
+            cycle_num=1,
+            attempt_num=1,
+            run_id="run-1",
+            session_state=SessionState(
+                mode="persistent",
+                thread_id=None,
+                pending_clarification_note=None,
+                created_at="2026-03-18T00:00:00Z",
+            ),
+            include_request_snapshot=True,
+        )
+
+
+def test_tracked_superloop_paths_excludes_runs_directory():
+    tracked = superloop.tracked_superloop_paths(".superloop/tasks/task-1", "implement")
+    assert ".superloop/tasks/task-1/runs/" not in tracked
+    assert ".superloop/tasks/task-1/implement/" in tracked
+
+
+def test_execute_pair_cycles_excludes_run_outputs_from_snapshot_delta_commits(tmp_path: Path, monkeypatch):
+    paths = ensure_workspace(tmp_path, "task-1", "Implement feature X", "replace")
+    run_paths = create_run_paths(paths["runs_dir"], "run-1", "Implement feature X")
+    recorder = EventRecorder(run_id="run-1", events_file=run_paths["events_file"])
+
+    phase_dir = paths["task_dir"] / "implement" / "phases" / "phase-1"
+    phase_dir.mkdir(parents=True, exist_ok=True)
+    criteria_file = phase_dir / "criteria.md"
+    feedback_file = phase_dir / "feedback.md"
+    criteria_file.write_text("- [x] done\n", encoding="utf-8")
+    feedback_file.write_text("# feedback\n", encoding="utf-8")
+
+    selection = superloop.ResolvedPhaseSelection(
+        phase_mode="single",
+        phase_ids=("phase-1",),
+        phases=(
+            superloop.PhasePlanPhase(
+                phase_id="phase-1",
+                title="Phase 1",
+                objective="Deliver phase 1",
+                in_scope=("code path A",),
+                out_of_scope=(),
+                dependencies=(),
+                acceptance_criteria=(superloop.PhasePlanCriterion(id="AC-1", text="done"),),
+                deliverables=("code",),
+                risks=(),
+                rollback=(),
+                status="planned",
+            ),
+        ),
+        explicit=True,
+    )
+    bundle = superloop.ArtifactBundle(
+        pair="implement",
+        scope="phase-local",
+        artifact_dir=phase_dir,
+        criteria_file=criteria_file,
+        feedback_file=feedback_file,
+        artifact_files={"criteria.md": criteria_file, "feedback.md": feedback_file},
+        allowed_verifier_prefixes=(f"{paths['task_root_rel']}/implement/phases/phase-1/",),
+        phase_id="phase-1",
+        phase_dir_key="phase-1",
+        phase_title="Phase 1",
+    )
+
+    producer_control = superloop.LoopControl(question=None, promise=None, source="canonical", raw_payload=None)
+    verifier_control = superloop.LoopControl(
+        question=None,
+        promise=superloop.PROMISE_COMPLETE,
+        source="canonical",
+        raw_payload=None,
+    )
+    parse_results = [producer_control, verifier_control]
+    delta_by_snapshot = {
+        "producer": {
+            ".superloop/tasks/task-1/runs/run-1/events.jsonl",
+            "src/feature.py",
+        },
+        "verifier": {
+            ".superloop/tasks/task-1/runs/run-1/summary.md",
+            ".superloop/tasks/task-1/implement/phases/phase-1/feedback.md",
+        },
+    }
+    committed_paths: list[tuple[str, set[str]]] = []
+
+    monkeypatch.setattr(superloop, "commit_tracked_changes", lambda *args, **kwargs: False)
+    monkeypatch.setattr(superloop, "phase_snapshot_ref", lambda *_args, **_kwargs: "producer" if not committed_paths else "verifier")
+    monkeypatch.setattr(
+        superloop,
+        "run_codex_phase",
+        lambda *args, **kwargs: "<loop-control></loop-control>",
+    )
+    monkeypatch.setattr(superloop, "parse_phase_control", lambda *args, **kwargs: parse_results.pop(0))
+    monkeypatch.setattr(
+        superloop,
+        "changed_paths_from_snapshot",
+        lambda _root, snapshot, tracked_paths=None: set(delta_by_snapshot[snapshot]),
+    )
+    monkeypatch.setattr(superloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        superloop,
+        "commit_paths",
+        lambda _root, message, paths: committed_paths.append((message, set(paths))) or True,
+    )
+
+    status, code = execute_pair_cycles(
+        pair_cfg=PairConfig(name="implement", enabled=True, max_iterations=1),
+        pair="implement",
+        prompt_file=tmp_path / "prompt.md",
+        verifier_prompt_file=tmp_path / "verifier_prompt.md",
+        artifact_bundle=bundle,
+        session_file=run_paths["plan_session_file"],
+        root=tmp_path,
+        codex_command=fake_codex_command(),
+        run_id="run-1",
+        run_paths=run_paths,
+        paths=paths,
+        recorder=recorder,
+        task_root_rel=str(paths["task_root_rel"]),
+        use_git=True,
+        active_phase_selection=selection,
+        enabled_pairs=["implement"],
+        args=argparse.Namespace(full_auto_answers=False),
+        resume_checkpoint=None,
+        use_resume_state=False,
+    )
+
+    assert (status, code) == ("complete", 0)
+    assert [message for message, _paths in committed_paths] == [
+        "superloop: producer edits (implement #1)",
+        "superloop: pair complete (implement)",
+    ]
+    assert all(
+        not any(path.startswith(".superloop/tasks/task-1/runs/") for path in paths)
+        for _message, paths in committed_paths
+    )
+    assert "src/feature.py" in committed_paths[0][1]
+    assert ".superloop/tasks/task-1/implement/phases/phase-1/feedback.md" in committed_paths[1][1]
+
+
+def test_execute_pair_cycles_excludes_run_outputs_from_blocked_commit(tmp_path: Path, monkeypatch):
+    paths = ensure_workspace(tmp_path, "task-1", "Implement feature X", "replace")
+    run_paths = create_run_paths(paths["runs_dir"], "run-1", "Implement feature X")
+    recorder = EventRecorder(run_id="run-1", events_file=run_paths["events_file"])
+
+    phase_dir = paths["task_dir"] / "implement" / "phases" / "phase-1"
+    phase_dir.mkdir(parents=True, exist_ok=True)
+    criteria_file = phase_dir / "criteria.md"
+    feedback_file = phase_dir / "feedback.md"
+    criteria_file.write_text("- [x] done\n", encoding="utf-8")
+    feedback_file.write_text("# feedback\n", encoding="utf-8")
+
+    selection = superloop.ResolvedPhaseSelection(
+        phase_mode="single",
+        phase_ids=("phase-1",),
+        phases=(
+            superloop.PhasePlanPhase(
+                phase_id="phase-1",
+                title="Phase 1",
+                objective="Deliver phase 1",
+                in_scope=("code path A",),
+                out_of_scope=(),
+                dependencies=(),
+                acceptance_criteria=(superloop.PhasePlanCriterion(id="AC-1", text="done"),),
+                deliverables=("code",),
+                risks=(),
+                rollback=(),
+                status="planned",
+            ),
+        ),
+        explicit=True,
+    )
+    bundle = superloop.ArtifactBundle(
+        pair="implement",
+        scope="phase-local",
+        artifact_dir=phase_dir,
+        criteria_file=criteria_file,
+        feedback_file=feedback_file,
+        artifact_files={"criteria.md": criteria_file, "feedback.md": feedback_file},
+        allowed_verifier_prefixes=(f"{paths['task_root_rel']}/implement/phases/phase-1/",),
+        phase_id="phase-1",
+        phase_dir_key="phase-1",
+        phase_title="Phase 1",
+    )
+
+    producer_control = superloop.LoopControl(question=None, promise=None, source="canonical", raw_payload=None)
+    verifier_control = superloop.LoopControl(
+        question=None,
+        promise=superloop.PROMISE_BLOCKED,
+        source="canonical",
+        raw_payload=None,
+    )
+    parse_results = [producer_control, verifier_control]
+    delta_by_snapshot = {
+        "producer": {
+            ".superloop/tasks/task-1/runs/run-1/events.jsonl",
+            "src/feature.py",
+        },
+        "verifier": {
+            ".superloop/tasks/task-1/runs/run-1/summary.md",
+            ".superloop/tasks/task-1/implement/phases/phase-1/feedback.md",
+        },
+    }
+    committed_paths: list[tuple[str, set[str]]] = []
+
+    monkeypatch.setattr(superloop, "commit_tracked_changes", lambda *args, **kwargs: False)
+    monkeypatch.setattr(superloop, "phase_snapshot_ref", lambda *_args, **_kwargs: "producer" if not committed_paths else "verifier")
+    monkeypatch.setattr(
+        superloop,
+        "run_codex_phase",
+        lambda *args, **kwargs: "<loop-control></loop-control>",
+    )
+    monkeypatch.setattr(superloop, "parse_phase_control", lambda *args, **kwargs: parse_results.pop(0))
+    monkeypatch.setattr(
+        superloop,
+        "changed_paths_from_snapshot",
+        lambda _root, snapshot, tracked_paths=None: set(delta_by_snapshot[snapshot]),
+    )
+    monkeypatch.setattr(superloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        superloop,
+        "commit_paths",
+        lambda _root, message, paths: committed_paths.append((message, set(paths))) or True,
+    )
+
+    status, code = execute_pair_cycles(
+        pair_cfg=PairConfig(name="implement", enabled=True, max_iterations=1),
+        pair="implement",
+        prompt_file=tmp_path / "prompt.md",
+        verifier_prompt_file=tmp_path / "verifier_prompt.md",
+        artifact_bundle=bundle,
+        session_file=run_paths["plan_session_file"],
+        root=tmp_path,
+        codex_command=fake_codex_command(),
+        run_id="run-1",
+        run_paths=run_paths,
+        paths=paths,
+        recorder=recorder,
+        task_root_rel=str(paths["task_root_rel"]),
+        use_git=True,
+        active_phase_selection=selection,
+        enabled_pairs=["implement"],
+        args=argparse.Namespace(full_auto_answers=False),
+        resume_checkpoint=None,
+        use_resume_state=False,
+    )
+
+    assert (status, code) == ("blocked", 2)
+    assert [message for message, _paths in committed_paths] == [
+        "superloop: producer edits (implement #1)",
+        "superloop: blocked (implement #1)",
+    ]
+    assert all(
+        not any(path.startswith(".superloop/tasks/task-1/runs/") for path in paths)
+        for _message, paths in committed_paths
+    )
+    assert "src/feature.py" in committed_paths[0][1]
+    assert ".superloop/tasks/task-1/implement/phases/phase-1/feedback.md" in committed_paths[1][1]
 
 
 def test_ensure_workspace_preserve_mode_keeps_existing_request(tmp_path: Path):
@@ -1006,7 +1494,6 @@ def test_ensure_workspace_does_not_rewrite_existing_task_prompts(tmp_path: Path)
     assert prompt_file.read_text(encoding="utf-8") == "custom prompt\n"
     assert verifier_prompt_file.read_text(encoding="utf-8") == "custom verifier prompt\n"
 
-
 def test_append_clarification_logs_to_raw_phase_log_and_updates_session(tmp_path: Path):
     run_paths = create_run_paths(tmp_path, "run-clarify", "Initial request")
     task_raw_log = tmp_path / "task_raw_phase_log.md"
@@ -1015,7 +1502,7 @@ def test_append_clarification_logs_to_raw_phase_log_and_updates_session(tmp_path
     append_clarification(
         run_paths["raw_phase_log"],
         task_raw_log,
-        run_paths["session_file"],
+        run_paths["plan_session_file"],
         pair="plan",
         phase="producer",
         cycle=1,
@@ -1030,7 +1517,7 @@ def test_append_clarification_logs_to_raw_phase_log_and_updates_session(tmp_path
     assert "entry=clarification" in run_text
     assert "source=human" in run_text
     assert "Approved answer" in run_text
-    session_payload = json.loads(run_paths["session_file"].read_text(encoding="utf-8"))
+    session_payload = json.loads(run_paths["plan_session_file"].read_text(encoding="utf-8"))
     assert "Approved answer" in session_payload["pending_clarification_note"]
 
 
@@ -1042,7 +1529,7 @@ def test_main_resume_without_session_file_starts_new_conversation_and_logs_notic
         intent_mode="replace",
     )
     run_paths = create_run_paths(paths["runs_dir"], "run-20260316T120000Z-abcdef12", "Legacy request")
-    run_paths["session_file"].unlink()
+    run_paths["plan_session_file"].unlink()
     control = superloop.LoopControl(
         question=None,
         promise=superloop.PROMISE_COMPLETE,
@@ -1077,7 +1564,7 @@ def test_main_resume_without_session_file_starts_new_conversation_and_logs_notic
 
     exit_code = superloop.main()
     assert exit_code == 0
-    session_payload = json.loads(run_paths["session_file"].read_text(encoding="utf-8"))
+    session_payload = json.loads(run_paths["plan_session_file"].read_text(encoding="utf-8"))
     assert session_payload["mode"] == "persistent"
     run_log_text = run_paths["run_log"].read_text(encoding="utf-8")
     raw_log_text = run_paths["raw_phase_log"].read_text(encoding="utf-8")
@@ -1093,7 +1580,7 @@ def test_main_resume_with_missing_thread_id_starts_new_conversation_and_logs_not
         intent_mode="replace",
     )
     run_paths = create_run_paths(paths["runs_dir"], "run-20260316T120000Z-abcdef12", "Legacy request")
-    run_paths["session_file"].write_text(
+    run_paths["plan_session_file"].write_text(
         json.dumps(
             {
                 "mode": "persistent",
@@ -1332,6 +1819,51 @@ def test_main_fails_fast_when_yaml_missing_for_plan_plus_phased_pairs(tmp_path: 
         superloop.main()
 
     assert phase_plan_file(paths["task_dir"]).exists() is False
+
+
+def test_main_plan_run_seeds_phase_plan_scaffold_after_request_snapshot_exists(tmp_path: Path, monkeypatch):
+    install_fake_yaml(monkeypatch)
+    seen: dict[str, object] = {}
+
+    def fake_execute_pair_cycles(*, run_paths, paths, **kwargs):
+        phase_plan_path = phase_plan_file(paths["task_dir"])
+        seen["phase_plan_exists"] = phase_plan_path.exists()
+        seen["request_exists"] = run_paths["request_file"].exists()
+        seen["payload"] = json.loads(phase_plan_path.read_text(encoding="utf-8"))
+        seen["request_file"] = str(run_paths["request_file"])
+        return ("complete", 0)
+
+    monkeypatch.setattr(superloop, "check_dependencies", lambda require_git=True: None)
+    monkeypatch.setattr(superloop, "resolve_codex_exec_command", lambda model: fake_codex_command())
+    monkeypatch.setattr(superloop, "execute_pair_cycles", fake_execute_pair_cycles)
+    monkeypatch.setattr(superloop, "commit_tracked_changes", lambda *args, **kwargs: False)
+    monkeypatch.setattr(
+        superloop.sys,
+        "argv",
+        [
+            "superloop.py",
+            "--workspace",
+            str(tmp_path),
+            "--pairs",
+            "plan",
+            "--task-id",
+            "plan-scaffold-task",
+            "--max-iterations",
+            "1",
+            "--no-git",
+        ],
+    )
+
+    exit_code = superloop.main()
+    assert exit_code == 0
+    assert seen["phase_plan_exists"] is True
+    assert seen["request_exists"] is True
+    assert seen["payload"] == {
+        "version": superloop.PHASE_PLAN_VERSION,
+        "task_id": "plan-scaffold-task",
+        "request_snapshot_ref": seen["request_file"],
+        "phases": [],
+    }
 
 
 def test_main_allows_implicit_legacy_phase_when_yaml_missing_and_no_explicit_plan(tmp_path: Path, monkeypatch):

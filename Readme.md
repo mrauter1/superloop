@@ -244,17 +244,21 @@ In other words:
       implement/
         prompt.md
         verifier_prompt.md
-        implementation_notes.md
-        review_findings.md
-        criteria.md
-        feedback.md
+        phases/
+          <phase-dir-key>/
+            implementation_notes.md
+            review_findings.md
+            criteria.md
+            feedback.md
       test/
         prompt.md
         verifier_prompt.md
-        test_strategy.md
-        test_gaps.md
-        criteria.md
-        feedback.md
+        phases/
+          <phase-dir-key>/
+            test_strategy.md
+            test_gaps.md
+            criteria.md
+            feedback.md
       runs/
         <run-id>/
           request.md
@@ -262,7 +266,12 @@ In other words:
           raw_phase_log.md
           events.jsonl
           summary.md
-          session.json
+          sessions/
+            plan.json
+            phases/
+              <phase-dir-key>.json
+
+For phased `implement` and `test`, the pair root keeps only prompts plus `phases/`. Mutable artifacts are created lazily under the active phase directory, and Codex session state is scoped to `sessions/phases/<phase-dir-key>.json`. There is no legacy run-level `session.json` fallback: plan uses `sessions/plan.json`, and phased prompt construction must receive the scoped session path explicitly.
 
 ## Configuration
 

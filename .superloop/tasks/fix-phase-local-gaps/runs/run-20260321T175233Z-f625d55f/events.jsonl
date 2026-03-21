@@ -1,0 +1,10 @@
+{"ts": "2026-03-21T17:52:33.684153+00:00", "run_id": "run-20260321T175233Z-f625d55f", "seq": 1, "event_type": "run_started", "workspace": "/workspace/superloop", "pairs": ["plan", "implement", "test"], "max_iterations": 15, "use_git": true, "task_id": "fix-phase-local-gaps", "task_root": ".superloop/tasks/fix-phase-local-gaps"}
+{"ts": "2026-03-21T17:52:33.684494+00:00", "run_id": "run-20260321T175233Z-f625d55f", "seq": 2, "event_type": "pair_started", "pair": "plan", "phase_id": null}
+{"ts": "2026-03-21T17:52:33.684650+00:00", "run_id": "run-20260321T175233Z-f625d55f", "seq": 3, "event_type": "cycle_started", "pair": "plan", "cycle": 1, "attempt": 1, "phase_id": null}
+{"ts": "2026-03-21T17:54:59.008596+00:00", "run_id": "run-20260321T175233Z-f625d55f", "seq": 4, "event_type": "phase_finished", "pair": "plan", "phase": "producer", "cycle": 1, "attempt": 1, "empty_output": false, "phase_id": null}
+{"ts": "2026-03-21T17:55:59.502660+00:00", "run_id": "run-20260321T175233Z-f625d55f", "seq": 5, "event_type": "phase_finished", "pair": "plan", "phase": "verifier", "cycle": 1, "attempt": 1, "empty_output": false, "phase_id": null}
+{"ts": "2026-03-21T17:56:01.561412+00:00", "run_id": "run-20260321T175233Z-f625d55f", "seq": 6, "event_type": "cycle_started", "pair": "plan", "cycle": 2, "attempt": 1, "phase_id": null}
+{"ts": "2026-03-21T17:56:57.079826+00:00", "run_id": "run-20260321T175233Z-f625d55f", "seq": 7, "event_type": "phase_finished", "pair": "plan", "phase": "producer", "cycle": 2, "attempt": 1, "empty_output": false, "phase_id": null}
+{"ts": "2026-03-21T17:57:32.541857+00:00", "run_id": "run-20260321T175233Z-f625d55f", "seq": 8, "event_type": "phase_finished", "pair": "plan", "phase": "verifier", "cycle": 2, "attempt": 1, "empty_output": false, "phase_id": null}
+{"ts": "2026-03-21T17:57:32.557029+00:00", "run_id": "run-20260321T175233Z-f625d55f", "seq": 9, "event_type": "pair_completed", "pair": "plan", "cycle": 2, "attempt": 1, "phase_id": null}
+{"ts": "2026-03-21T17:57:32.607129+00:00", "run_id": "run-20260321T175233Z-f625d55f", "seq": 10, "event_type": "run_finished", "status": "fatal_error", "exit_code": 1}

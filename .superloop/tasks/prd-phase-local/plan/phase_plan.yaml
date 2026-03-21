@@ -1,0 +1,49 @@
+version: 1
+task_id: prd-phase-local
+request_snapshot_ref: .superloop/tasks/prd-phase-local/runs/run-20260321T171128Z-3eb8b0e4/request.md
+phases:
+  - phase_id: phase-local-contract-alignment
+    title: Align defaults, docs, and tests with phase-local runtime behavior
+    objective: >-
+      Complete the PRD by bringing built-in prompt templates, README layout
+      documentation, and regression coverage into full agreement with the
+      existing runtime rule that plan is task-global while implement and test
+      mutable artifacts and Codex session state are phase-local.
+    in_scope:
+      - Update built-in implement/test prompt templates so future bootstrapped workspaces reference active-phase artifacts instead of legacy pair-root mutable files.
+      - Preserve ensure_workspace prompt ownership semantics and keep pair-root prompts plus phases directories as the only eager phased-pair bootstrap artifacts.
+      - Make the scoped session-state contract explicit, including persistence of pending_clarification_note in plan.json or the active phase session file as appropriate.
+      - Update README repository/session layout examples to match the runtime filesystem and session structure.
+      - Extend focused tests for phase key generation, lazy artifact creation, session routing, scoped clarification persistence, fresh-vs-resumed bootstrap, and verifier scope.
+    out_of_scope:
+      - Prompt migration or forced refresh of existing task-local prompt.md or verifier_prompt.md files.
+      - New CLI flags, config toggles, external dependencies, or concurrent phase execution.
+      - New summary or handoff artifacts.
+      - Architectural refactors outside the existing helper boundaries unless a failing regression test proves a real contract gap.
+    future_phase_deferments: []
+    dependencies: []
+    acceptance_criteria:
+      - id: AC-1
+        text: Task-global plan artifacts remain under plan/ while implement and test mutable artifacts resolve only from active phase directories under pair/phases/<phase-dir-key>/.
+      - id: AC-2
+        text: Plan uses sessions/plan.json and phased implement/test use sessions/phases/<phase-dir-key>.json, with same-phase sharing and cross-phase separation.
+      - id: AC-3
+        text: pending_clarification_note is persisted and cleared in the same scope-specific session file selected for the active pair execution.
+      - id: AC-4
+        text: Fresh phased threads bootstrap only from authoritative request, clarification, prior-phase status, prior artifact path, active contract, and active artifact inputs, while resumed threads skip bootstrap reinjection.
+      - id: AC-5
+        text: Workspace bootstrap creates plan artifacts plus phased pair prompts and phases directories without creating pair-root mutable implement/test files or overwriting prompts.
+      - id: AC-6
+        text: Verifier scope rejects edits outside the active phase, and built-in prompts plus README no longer describe legacy pair-root mutable artifacts or a single run-level session.json.
+    deliverables:
+      - Updated built-in prompt template wording in superloop.py
+      - Updated focused regression coverage for scoped artifacts and session state
+      - Updated README filesystem and session layout documentation
+    risks:
+      - Existing task-local prompt files can still contain legacy prose because prompt migration is intentionally forbidden.
+      - If any code path bypasses resolve_session_file, thread memory or clarification state could leak across phases.
+      - Documentation drift can reintroduce incorrect operator assumptions even when runtime behavior is correct.
+    rollback:
+      - Revert prompt/doc wording changes independently if regressions are limited to messaging while preserving proven runtime helpers.
+      - Revert any helper change and restore the current centralized routing path if targeted tests expose a session or artifact scoping regression.
+    status: planned

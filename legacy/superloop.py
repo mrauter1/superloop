@@ -44,9 +44,6 @@ PAIR_LABELS = {
     "test": "Test Author ↔ Test Auditor",
 }
 
-PLAN_GLOBAL_ARTIFACTS = ("criteria.md", "feedback.md", "plan.md", "phase_plan.yaml")
-IMPLEMENT_PHASE_LOCAL_ARTIFACTS = ("criteria.md", "feedback.md", "implementation_notes.md", "review_findings.md")
-TEST_PHASE_LOCAL_ARTIFACTS = ("criteria.md", "feedback.md", "test_strategy.md", "test_gaps.md")
 PAIR_ARTIFACTS = {
     "plan": ["plan.md"],
     "implement": ["implementation_notes.md", "review_findings.md"],
@@ -70,12 +67,9 @@ RUNTIME_PHASE_STATUSES = {
     PHASE_STATUS_DEFERRED,
 }
 IMPLICIT_PHASE_ID = "implicit-phase"
-MAX_PHASE_ID_UTF8_BYTES = 96
-PHASE_DIR_SAFE_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 DEFAULT_CODEX_MODEL = "gpt-5.4"
 DEFAULT_PAIRS = "plan,implement,test"
 DEFAULT_MAX_ITERATIONS = 15
-MAX_FRESH_PHASE_BOOTSTRAP_BYTES = 32 * 1024
 DEFAULT_PHASE_MODE = PHASE_MODE_SINGLE
 DEFAULT_INTENT_MODE = "preserve"
 DEFAULT_FULL_AUTO_ANSWERS = False
@@ -122,43 +116,14 @@ Turn the user intent into an implementation-ready plan with milestones, interfac
 ## Authoritative context
 - The run preamble identifies the immutable request snapshot and the authoritative chronological raw log for this run.
 - Use the original request plus any later clarification entries as the source of truth for intent.
-- If the user already supplied a detailed plan/specification, treat it as the default implementation contract and adopt it without drifting scope or structure unless the user confirms a change.
 - Explore the repository as needed for dependency and regression analysis, but do not expand task scope unless explicitly justified.
 
 ## Required outputs
 Update `.superloop/plan/plan.md` as the single source of truth for the plan, including milestones, interface definitions, and risk register details in that one file.
 
-Create or update `.superloop/plan/phase_plan.yaml` as the canonical machine-readable ordered phase decomposition by authoring the `phases` payload only. Runtime seeds and owns the top-level metadata (`version`, `task_id`, `request_snapshot_ref`). If the task is genuinely small and coherently shippable as one slice, produce exactly one explicit phase rather than inventing artificial decomposition.
+Create or update `.superloop/plan/phase_plan.yaml` as the canonical machine-readable ordered phase decomposition. If the task is genuinely small and coherently shippable as one slice, produce exactly one explicit phase rather than inventing artificial decomposition.
 
 Also append a concise entry to `.superloop/plan/feedback.md` with what changed and why.
-
-Keep the plan artifacts coherent as one set:
-- `.superloop/plan/plan.md`
-- `.superloop/plan/phase_plan.yaml`
-- `.superloop/plan/feedback.md`
-- `.superloop/plan/criteria.md` (verifier-owned; read-only for planner)
-
-`phase_plan.yaml` runtime-owned top-level shape:
-```yaml
-version: 1
-task_id: <current-task-id>
-request_snapshot_ref: <non-empty string reference to request snapshot>
-phases:
-  - phase_id: <kebab-case-or-safe-id>
-    title: <non-empty string>
-    objective: <non-empty string>
-    status: planned | in_progress | completed | blocked | deferred
-    in_scope: [<non-empty string>, ...]            # must be non-empty
-    out_of_scope: [<string>, ...]
-    dependencies: [<earlier phase_id>, ...]        # each dependency must appear earlier in order
-    acceptance_criteria:
-      - id: AC-1
-        text: <non-empty string>
-    deliverables: [<non-empty string>, ...]        # must be non-empty
-    risks: [<string>, ...]
-    rollback: [<string>, ...]
-```
-Only author or update entries under `phases:`. Do not edit or replace `version`, `task_id`, or `request_snapshot_ref`; those keys are runtime-owned and incorrect changes are invalid.
 
 ## Rules
 1. Analyze codebase areas and behaviors relevant to the current user request first. Broaden analysis scope when justified: cross-cutting patterns must be checked, dependencies are unclear, behavior may be reused elsewhere, or the repository/files are small enough that full analysis is cheaper and safer.
@@ -168,18 +133,15 @@ Only author or update entries under `phases:`. Do not edit or replace `version`,
 5. Do not edit `.superloop/plan/criteria.md` (verifier-owned).
 6. `phase_plan.yaml` must define coherent ordered phases with explicit dependency ordering, in-scope/out-of-scope boundaries, acceptance criteria, and future-phase deferments. Do not use heuristics or scoring rules for granularity.
 7. Accept a single explicit phase when scope is small and coherent; do not force multi-phase decomposition for its own sake.
-8. Runtime-owned metadata keys are read-only for the planner. Do not change `version`, `task_id`, or `request_snapshot_ref`.
-9. If the user request is ambiguous, logically flawed, introduces breaking changes, may cause regressions, or may create hidden unintended behavior, warn the user via a clarifying question.
-10. Every clarifying question must include your best suggestion/supposition so the user can confirm or correct quickly.
-11. When you have a better alternative than the current user plan/spec, present it as a question with best supposition and wait for confirmation before changing the plan direction.
-12. Final user intent after all clarifications is authoritative and must take precedence over planner preference.
-13. When asking a clarifying question, do not edit files and output exactly one canonical loop-control block as the last non-empty logical block:
+8. If the user request is ambiguous, logically flawed, introduces breaking changes, may cause regressions, or may create hidden unintended behavior, warn the user via a clarifying question.
+9. Every clarifying question must include your best suggestion/supposition so the user can confirm or correct quickly.
+10. When asking a clarifying question, do not edit files and output exactly one canonical loop-control block as the last non-empty logical block:
 <loop-control>
 {"schema":"docloop.loop_control/v1","kind":"question","question":"Question text.","best_supposition":"..."}
 </loop-control>
 Legacy `<question>...</question>` remains supported for compatibility, but the canonical loop-control block is the default contract.
-14. Before the final loop-control block, print a concise plain-text summary with these exact headings: `Scope considered`, `What I analyzed`, `What I changed`, `Key findings / decisions`, `Open issues / next step`.
-15. Do not output any `<promise>...</promise>` tag.
+11. Before the final loop-control block, print a concise plain-text summary with these exact headings: `Scope considered`, `What I analyzed`, `What I changed`, `Key findings / decisions`, `Open issues / next step`.
+12. Do not output any `<promise>...</promise>` tag.
 """,
     "implement": """# Superloop Implementer Instructions
 You are the implementation agent for this repository.
@@ -191,11 +153,9 @@ Implement the approved plan and reviewer feedback with high-quality multi-file c
 - Request snapshot and run raw log identified in the run preamble
 - The active phase execution contract injected in the run preamble for implement/test phase-scoped runs
 - Repository areas required by the current task and justified blast radius
-- The authoritative active phase artifact files injected in the run preamble, especially:
-  `.superloop/implement/phases/<phase-dir-key>/feedback.md`
+- `.superloop/implement/feedback.md`
 - `.superloop/plan/plan.md`
-- `.superloop/implement/phases/<phase-dir-key>/implementation_notes.md`
-- The authoritative active session file injected in the run preamble
+- `.superloop/implement/implementation_notes.md`
 
 ## Rules
 1. Treat the original request plus later clarification entries as authoritative for intent. Pair artifacts may refine execution details, but they may not override explicit user intent.
@@ -205,11 +165,11 @@ Implement the approved plan and reviewer feedback with high-quality multi-file c
 5. Resolve reviewer findings explicitly and avoid introducing unrelated refactors.
 6. When you see duplicated logic that clearly adds technical debt, centralize it into a shared abstraction/module unless that would introduce unjustified complexity.
 7. Before finalizing edits, check likely regression surfaces for touched behavior (interfaces, persisted data, compatibility, tests).
-8. Treat the active phase contract as authoritative scoped work for implement/test runs. Any intentional out-of-phase change must be explicitly justified in `.superloop/implement/phases/<phase-dir-key>/implementation_notes.md`.
+8. Treat the active phase contract as authoritative scoped work for implement/test runs. Any intentional out-of-phase change must be explicitly justified in `.superloop/implement/implementation_notes.md`.
 9. Map your edits to the implementation checklist in `.superloop/plan/plan.md` when present, and note any checklist item you intentionally defer.
-10. Update `.superloop/implement/phases/<phase-dir-key>/implementation_notes.md` with: files changed, checklist mapping, assumptions, expected side effects, and any deduplication/centralization decisions.
+10. Update `.superloop/implement/implementation_notes.md` with: files changed, checklist mapping, assumptions, expected side effects, and any deduplication/centralization decisions.
 11. Before the final loop-control block, print a concise plain-text summary with these exact headings: `Scope considered`, `What I analyzed`, `What I changed`, `Key findings / decisions`, `Open issues / next step`.
-12. Do not edit `.superloop/implement/phases/<phase-dir-key>/criteria.md` (reviewer-owned).
+12. Do not edit `.superloop/implement/criteria.md` (reviewer-owned).
 13. If ambiguity or intent gaps remain, or if a required change may introduce breaking behavior/regressions, ask a clarifying question with your best suggestion/supposition and do not edit files:
 <loop-control>
 {"schema":"docloop.loop_control/v1","kind":"question","question":"Question text.","best_supposition":"..."}
@@ -226,9 +186,8 @@ Create or refine tests and fixtures to validate changed behavior and prevent reg
 ## Required outputs
 - Update relevant test files in the repository.
 - Respect the active phase execution contract injected in the run preamble for test-phase runs.
-- Update `.superloop/test/phases/<phase-dir-key>/test_strategy.md` with an explicit behavior-to-test coverage map.
-- Append a concise entry to `.superloop/test/phases/<phase-dir-key>/feedback.md` summarizing test additions.
-- Use the authoritative active session file injected in the run preamble for any clarification-aware resume reasoning.
+- Update `.superloop/test/test_strategy.md` with an explicit behavior-to-test coverage map.
+- Append a concise entry to `.superloop/test/feedback.md` summarizing test additions.
 
 ## Rules
 1. Treat the original request plus later clarification entries as authoritative for intent. Pair artifacts may refine execution details, but they may not override explicit user intent.
@@ -238,7 +197,7 @@ Create or refine tests and fixtures to validate changed behavior and prevent reg
 5. For each changed behavior, include happy path, edge case, and failure-path coverage where relevant.
 6. Call out flake risks (timing, network, nondeterministic ordering) and stabilization approach.
 7. Before the final loop-control block, print a concise plain-text summary with these exact headings: `Scope considered`, `What I analyzed`, `What I changed`, `Key findings / decisions`, `Open issues / next step`.
-8. Do not edit `.superloop/test/phases/<phase-dir-key>/criteria.md` (auditor-owned).
+8. Do not edit `.superloop/test/criteria.md` (auditor-owned).
 9. If blocked by missing intent, ask a clarifying question with your best suggestion/supposition and do not edit files:
 <loop-control>
 {"schema":"docloop.loop_control/v1","kind":"question","question":"Question text.","best_supposition":"..."}
@@ -254,7 +213,6 @@ You are the plan verifier.
 
 ## Goal
 Audit planning artifacts for correctness, completeness, regression risk, and KISS/DRY quality.
-Primal priority: verify the generated plan against user intent (including any user-provided plan/spec) plus authoritative clarifications; every original intent point must be addressed.
 
 ## Required actions
 1. Update `.superloop/plan/criteria.md` checkboxes accurately.
@@ -266,21 +224,13 @@ Primal priority: verify the generated plan against user intent (including any us
 </loop-control>
 or the same shape with `INCOMPLETE` / `BLOCKED`.
 
-## Artifacts that must be verified
-- `.superloop/plan/plan.md` (primary narrative/source-of-truth plan)
-- `.superloop/plan/phase_plan.yaml` (machine-readable phase contract)
-- `.superloop/plan/feedback.md` (findings/history continuity and closure tracking)
-- `.superloop/plan/criteria.md` (final gating checklist consistency)
-
 ## Rules
 - You may not edit repository source code.
-- The top verification criterion is intent fidelity: every user-requested requirement and clarified constraint must be explicitly handled in the plan; missing intent coverage is a blocking issue.
 - Treat the run raw log as the authoritative chronological ledger for clarifications and scope decisions. Later clarification entries override earlier assumptions for execution details.
 - Focus on request-relevant and changed-scope plan sections first; justify any out-of-scope finding. Broaden analysis when cross-cutting patterns/dependencies or small-repo economics make wider review safer.
 - A finding may be `blocking` only if it materially risks correctness, compatibility, hidden behavior changes, or implementation failure.
 - For each `blocking` finding include evidence: affected section(s), concrete failure/conflict scenario, and minimal correction direction.
 - Validate `phase_plan.yaml` quality by review judgment: coherent boundaries, dependency ordering, acceptance criteria, and future-phase deferments.
-- Treat incorrect runtime-owned `phase_plan.yaml` metadata (`version`, `task_id`, `request_snapshot_ref`) as a blocking issue.
 - Accept a single explicit phase when the task is genuinely small and coherent; do not require multiple phases for their own sake.
 - Do not require or invent runtime heuristics for phase granularity.
 - Do not return `INCOMPLETE` if you have no blocking findings.
@@ -296,8 +246,8 @@ You are the code reviewer.
 Audit implementation diffs for correctness, architecture conformance, security, performance, and maintainability.
 
 ## Required actions
-1. Update `.superloop/implement/phases/<phase-dir-key>/criteria.md` checkboxes accurately.
-2. Append prioritized review findings to `.superloop/implement/phases/<phase-dir-key>/feedback.md` with stable IDs (for example `IMP-001`).
+1. Update `.superloop/implement/criteria.md` checkboxes accurately.
+2. Append prioritized review findings to `.superloop/implement/feedback.md` with stable IDs (for example `IMP-001`).
 3. Label each finding as `blocking` or `non-blocking`.
 4. End stdout with exactly one canonical loop-control block as the last non-empty logical block:
 <loop-control>
@@ -309,13 +259,11 @@ or the same shape with `INCOMPLETE` / `BLOCKED`.
 - Do not modify non-`.superloop/` code files.
 - Treat the original request plus later clarification entries as authoritative for intent.
 - Treat the run raw log as the authoritative chronological ledger for clarifications and scope decisions. Later clarification entries override earlier assumptions for execution details.
-- Treat the active phase artifact directory and active session file injected in the run preamble as authoritative for this review.
 - Review changed/request-relevant scope first; justify any out-of-scope finding. Broaden analysis when shared patterns, uncertain dependencies, or small-repo economics justify wider inspection.
 - Repo-wide exploration is allowed for dependency and regression analysis, but unrelated dirty files are not part of this task unless explicitly justified.
 - A finding may be `blocking` only if it materially risks correctness, security, reliability, compatibility, required behavior coverage, or introduces avoidable duplicated logic that increases technical debt.
 - Flag duplicated logic that should be centralized for DRY/KISS as a finding; treat it as `blocking` when duplication is substantial and likely to increase maintenance or inconsistency risk.
 - Each `blocking` finding must include: file/symbol reference, concrete failure or regression (or maintainability debt) scenario, and minimal fix direction including centralization target when applicable.
-- Do not edit or approve writes outside the active phase artifact directory except orchestrator-owned run/task bookkeeping files already allowed by the runtime.
 - Do not return `INCOMPLETE` if you have no blocking findings.
 - Ask a canonical `<loop-control>` question block only for missing product intent, and include best suggestion/supposition.
 - If COMPLETE, criteria must have no unchecked boxes.
@@ -329,8 +277,8 @@ You are the test auditor.
 Audit tests for coverage quality, edge-case depth, and flaky-risk control.
 
 ## Required actions
-1. Update `.superloop/test/phases/<phase-dir-key>/criteria.md` checkboxes accurately.
-2. Append prioritized audit findings to `.superloop/test/phases/<phase-dir-key>/feedback.md` with stable IDs (for example `TST-001`).
+1. Update `.superloop/test/criteria.md` checkboxes accurately.
+2. Append prioritized audit findings to `.superloop/test/feedback.md` with stable IDs (for example `TST-001`).
 3. Label each finding as `blocking` or `non-blocking`.
 4. End stdout with exactly one canonical loop-control block as the last non-empty logical block:
 <loop-control>
@@ -342,12 +290,10 @@ or the same shape with `INCOMPLETE` / `BLOCKED`.
 - Do not edit repository code except `.superloop/test/*` audit artifacts.
 - Treat the original request plus later clarification entries as authoritative for intent.
 - Treat the run raw log as the authoritative chronological ledger for clarifications and scope decisions. Later clarification entries override earlier assumptions for execution details.
-- Treat the active phase artifact directory and active session file injected in the run preamble as authoritative for this audit.
 - Focus on changed/request-relevant behavior first; justify any out-of-scope finding. Broaden analysis when shared patterns, uncertain dependencies, or small-repo economics justify wider inspection.
 - Repo-wide exploration is allowed for dependency and regression analysis, but unrelated dirty files are not part of this task unless explicitly justified.
 - A finding may be `blocking` only if it materially risks regression detection, correctness coverage, or test reliability.
 - Each `blocking` finding must include evidence: affected behavior/tests, concrete missed-regression scenario, and minimal correction direction.
-- Do not edit or approve writes outside the active phase artifact directory except orchestrator-owned run/task bookkeeping files already allowed by the runtime.
 - Low-confidence concerns should be non-blocking suggestions.
 - Do not return `INCOMPLETE` if you have no blocking findings.
 - Ask a canonical `<loop-control>` question block only for missing product intent, and include best suggestion/supposition.
@@ -517,20 +463,6 @@ class ResolvedPhaseSelection:
         return not self.explicit
 
 
-@dataclass(frozen=True)
-class ArtifactBundle:
-    pair: str
-    scope: str
-    artifact_dir: Path
-    criteria_file: Path
-    feedback_file: Path
-    artifact_files: Dict[str, Path]
-    allowed_verifier_prefixes: Tuple[str, ...]
-    phase_id: Optional[str] = None
-    phase_dir_key: Optional[str] = None
-    phase_title: Optional[str] = None
-
-
 class PhasePlanError(ValueError):
     """Raised when phase-plan state is invalid or ambiguous."""
 
@@ -571,75 +503,6 @@ def normalize_repo_path(path_text: str) -> str:
 
 def phase_plan_file(task_dir: Path) -> Path:
     return task_dir / "plan" / "phase_plan.yaml"
-
-
-def authoritative_phase_plan_metadata(task_id: str, request_file: Path) -> Dict[str, object]:
-    return {
-        "version": PHASE_PLAN_VERSION,
-        "task_id": task_id,
-        "request_snapshot_ref": str(request_file),
-    }
-
-
-def ensure_phase_plan_scaffold(task_dir: Path, task_id: str, request_file: Path) -> Path:
-    if yaml is None:
-        raise PhasePlanError(
-            "phase_plan.yaml cannot be scaffolded without PyYAML installed. Install dependencies from requirements.txt."
-        )
-
-    plan_path = phase_plan_file(task_dir)
-    phases: object = []
-    if plan_path.exists():
-        try:
-            existing_payload = yaml.safe_load(plan_path.read_text(encoding="utf-8"))
-        except (yaml.YAMLError, OSError):
-            existing_payload = None
-        if isinstance(existing_payload, dict) and "phases" in existing_payload:
-            phases = existing_payload.get("phases")
-
-    scaffold = authoritative_phase_plan_metadata(task_id, request_file)
-    scaffold["phases"] = [] if phases is None else phases
-    plan_path.parent.mkdir(parents=True, exist_ok=True)
-    plan_path.write_text(json.dumps(scaffold, indent=2) + "\n", encoding="utf-8")
-    return plan_path
-
-
-def validate_phase_id(phase_id: str) -> str:
-    normalized = phase_id.strip()
-    if not normalized:
-        raise PhasePlanError("phase_id must be a non-empty string.")
-    if len(normalized.encode("utf-8")) > MAX_PHASE_ID_UTF8_BYTES:
-        raise PhasePlanError(
-            f"phase_id {normalized!r} exceeds {MAX_PHASE_ID_UTF8_BYTES} UTF-8 bytes."
-        )
-    return normalized
-
-
-def phase_dir_key(phase_id: str) -> str:
-    normalized = validate_phase_id(phase_id)
-    if PHASE_DIR_SAFE_RE.fullmatch(normalized):
-        return normalized
-    return f"_pid-{normalized.encode('utf-8').hex()}"
-
-
-def phase_artifact_dir(task_dir: Path, pair: str, phase_id: str) -> Path:
-    return task_dir / pair / "phases" / phase_dir_key(phase_id)
-
-
-def plan_session_file(run_dir: Path) -> Path:
-    return run_dir / "sessions" / "plan.json"
-
-
-def phase_session_file(run_dir: Path, phase_id: str) -> Path:
-    return run_dir / "sessions" / "phases" / f"{phase_dir_key(phase_id)}.json"
-
-
-def resolve_session_file(pair: str, active_phase_selection: Optional[ResolvedPhaseSelection], run_dir: Path) -> Path:
-    if pair == "plan":
-        return plan_session_file(run_dir)
-    if pair in PHASED_PAIRS and active_phase_selection and active_phase_selection.phase_ids:
-        return phase_session_file(run_dir, active_phase_selection.phase_ids[0])
-    return plan_session_file(run_dir)
 
 
 def parse_status_paths(status_text: str) -> Set[str]:
@@ -910,10 +773,9 @@ def changed_paths(cwd: Path, tracked_paths: Optional[Sequence[str]] = None) -> S
     return parse_status_paths(run_git(args, cwd=cwd).stdout)
 
 
-def allowed_verifier_paths(bundle: ArtifactBundle, task_root: str) -> List[str]:
+def allowed_verifier_paths(pair: str, task_root: str) -> List[str]:
     """Returns repo-relative paths a verifier is allowed to edit for a pair."""
-    del task_root
-    return list(bundle.allowed_verifier_prefixes)
+    return [f"{task_root}/{pair}/"]
 
 
 def superloop_artifact_paths(task_root: str) -> List[str]:
@@ -938,13 +800,9 @@ def is_superloop_artifact_path(path: str, task_root: str) -> bool:
     return False
 
 
-def verifier_scope_violations(bundle: ArtifactBundle | str, verifier_delta: Set[str], task_root: str) -> List[str]:
+def verifier_scope_violations(pair: str, verifier_delta: Set[str], task_root: str) -> List[str]:
     """Returns verifier writes that are outside its allowed scope and not orchestrator artifacts."""
-    if isinstance(bundle, str):
-        legacy_prefix = f"{task_root}/{bundle}/"
-        allowed = (legacy_prefix,)
-    else:
-        allowed = tuple(allowed_verifier_paths(bundle, task_root))
+    allowed = tuple(allowed_verifier_paths(pair, task_root))
     return sorted(
         path
         for path in verifier_delta
@@ -954,7 +812,7 @@ def verifier_scope_violations(bundle: ArtifactBundle | str, verifier_delta: Set[
 
 def tracked_superloop_paths(task_root: str, pair: Optional[str] = None) -> List[str]:
     """Returns paths that Superloop may stage/commit."""
-    shared_paths = [path for path in superloop_artifact_paths(task_root) if path != f"{task_root}/runs/"]
+    shared_paths = superloop_artifact_paths(task_root)
     if pair is None:
         pair_paths = [f"{task_root}/{name}/" for name in PAIR_ORDER]
     else:
@@ -962,23 +820,8 @@ def tracked_superloop_paths(task_root: str, pair: Optional[str] = None) -> List[
     return [*shared_paths, *pair_paths]
 
 
-def filter_volatile_task_run_paths(paths: Iterable[str], task_root: str) -> Set[str]:
-    """Drops volatile per-run task outputs from arbitrary path sets."""
-    run_prefix = f"{task_root}/runs/"
-    return {path for path in paths if path and not path.startswith(run_prefix)}
-
-
-def _phase_criteria_payload(
-    raw_value: object,
-    label: str,
-    *,
-    allow_missing: bool = False,
-) -> Tuple[PhasePlanCriterion, ...]:
-    if raw_value is None:
-        if allow_missing:
-            return ()
-        raise PhasePlanError(f"{label} must be a non-empty list.")
-    if not isinstance(raw_value, list):
+def _phase_criteria_payload(raw_value: object, label: str) -> Tuple[PhasePlanCriterion, ...]:
+    if not isinstance(raw_value, list) or not raw_value:
         raise PhasePlanError(f"{label} must be a non-empty list.")
     items: List[PhasePlanCriterion] = []
     for idx, raw_item in enumerate(raw_value, start=1):
@@ -994,17 +837,7 @@ def _phase_criteria_payload(
     return tuple(items)
 
 
-def _phase_string_list(
-    raw_value: object,
-    label: str,
-    *,
-    allow_empty: bool = True,
-    allow_missing: bool = False,
-) -> Tuple[str, ...]:
-    if raw_value is None:
-        if allow_missing:
-            return ()
-        raise PhasePlanError(f"{label} must be a list.")
+def _phase_string_list(raw_value: object, label: str, *, allow_empty: bool = True) -> Tuple[str, ...]:
     if not isinstance(raw_value, list):
         raise PhasePlanError(f"{label} must be a list.")
     items: List[str] = []
@@ -1049,7 +882,7 @@ def validate_phase_plan(payload: object, task_id: str) -> PhasePlan:
         status = raw_phase.get("status")
         if not isinstance(phase_id, str) or not phase_id.strip():
             raise PhasePlanError(f"{label}.phase_id must be a non-empty string.")
-        normalized_phase_id = validate_phase_id(phase_id)
+        normalized_phase_id = phase_id.strip()
         if normalized_phase_id in phase_ids:
             raise PhasePlanError(f"phase_plan.yaml contains duplicate phase_id {normalized_phase_id!r}.")
         if not isinstance(title, str) or not title.strip():
@@ -1067,24 +900,15 @@ def validate_phase_plan(payload: object, task_id: str) -> PhasePlan:
                 title=title.strip(),
                 objective=objective.strip(),
                 in_scope=_phase_string_list(raw_phase.get("in_scope"), f"{label}.in_scope", allow_empty=False),
-                out_of_scope=_phase_string_list(
-                    raw_phase.get("out_of_scope"),
-                    f"{label}.out_of_scope",
-                    allow_missing=True,
-                ),
-                dependencies=_phase_string_list(
-                    raw_phase.get("dependencies"),
-                    f"{label}.dependencies",
-                    allow_missing=True,
-                ),
+                out_of_scope=_phase_string_list(raw_phase.get("out_of_scope"), f"{label}.out_of_scope"),
+                dependencies=_phase_string_list(raw_phase.get("dependencies"), f"{label}.dependencies"),
                 acceptance_criteria=_phase_criteria_payload(
                     raw_phase.get("acceptance_criteria"),
                     f"{label}.acceptance_criteria",
-                    allow_missing=True,
                 ),
                 deliverables=_phase_string_list(raw_phase.get("deliverables"), f"{label}.deliverables", allow_empty=False),
-                risks=_phase_string_list(raw_phase.get("risks"), f"{label}.risks", allow_missing=True),
-                rollback=_phase_string_list(raw_phase.get("rollback"), f"{label}.rollback", allow_missing=True),
+                risks=_phase_string_list(raw_phase.get("risks"), f"{label}.risks"),
+                rollback=_phase_string_list(raw_phase.get("rollback"), f"{label}.rollback"),
                 status=status,
             )
         )
@@ -1738,103 +1562,6 @@ def render_task_prompt(template: str, task_root_rel: str) -> str:
     return template.replace(".superloop/", f"{task_root_rel}/")
 
 
-def _phase_metadata_block(task_id: str, pair: str, phase_id: str, phase_title: str, scope: str) -> str:
-    return (
-        f"- Task ID: {task_id}\n"
-        f"- Pair: {pair}\n"
-        f"- Phase ID: {phase_id}\n"
-        f"- Phase Directory Key: {phase_dir_key(phase_id)}\n"
-        f"- Phase Title: {phase_title}\n"
-        f"- Scope: {scope}\n"
-    )
-
-
-def _phase_artifact_template(task_id: str, pair: str, phase_id: str, phase_title: str, filename: str) -> str:
-    title_map = {
-        "criteria.md": "Criteria",
-        "feedback.md": f"{PAIR_LABELS[pair]} Feedback",
-        "implementation_notes.md": "Implementation Notes",
-        "review_findings.md": "Review Findings",
-        "test_strategy.md": "Test Strategy",
-        "test_gaps.md": "Test Gaps",
-    }
-    scope = (
-        "phase-local authoritative verifier artifact"
-        if filename in {"criteria.md", "feedback.md"}
-        else "phase-local producer artifact"
-    )
-    header = f"# {title_map.get(filename, filename)}\n\n"
-    meta = _phase_metadata_block(task_id, pair, phase_id, phase_title, scope)
-    body = ""
-    if filename == "criteria.md":
-        body = PAIR_CRITERIA_TEMPLATES[pair].split("\n", 1)[1]
-    return f"{header}{meta}\n{body}".rstrip() + "\n"
-
-
-def resolve_artifact_bundle(
-    *,
-    root: Path,
-    task_dir: Path,
-    task_id: str,
-    task_root_rel: str,
-    pair: str,
-    active_phase_selection: Optional[ResolvedPhaseSelection],
-) -> ArtifactBundle:
-    if pair == "plan":
-        artifact_dir = task_dir / "plan"
-        mapping = {name: artifact_dir / name for name in PLAN_GLOBAL_ARTIFACTS}
-        return ArtifactBundle(
-            pair=pair,
-            scope="task-global",
-            artifact_dir=artifact_dir,
-            criteria_file=mapping["criteria.md"],
-            feedback_file=mapping["feedback.md"],
-            artifact_files=mapping,
-            allowed_verifier_prefixes=(f"{task_root_rel}/plan/",),
-        )
-    if active_phase_selection is None or not active_phase_selection.phase_ids:
-        raise PhasePlanError(f"Pair {pair!r} requires an active phase selection.")
-    phase = active_phase_selection.phases[0]
-    phase_id = validate_phase_id(phase.phase_id)
-    key = phase_dir_key(phase_id)
-    artifact_dir = task_dir / pair / "phases" / key
-    names = IMPLEMENT_PHASE_LOCAL_ARTIFACTS if pair == "implement" else TEST_PHASE_LOCAL_ARTIFACTS
-    mapping = {name: artifact_dir / name for name in names}
-    return ArtifactBundle(
-        pair=pair,
-        scope="phase-local",
-        artifact_dir=artifact_dir,
-        criteria_file=mapping["criteria.md"],
-        feedback_file=mapping["feedback.md"],
-        artifact_files=mapping,
-        allowed_verifier_prefixes=(
-            f"{task_root_rel}/{pair}/phases/{key}/",
-            f"{task_root_rel}/runs/",
-            f"{task_root_rel}/run_log.md",
-            f"{task_root_rel}/raw_phase_log.md",
-            f"{task_root_rel}/task.json",
-        ),
-        phase_id=phase_id,
-        phase_dir_key=key,
-        phase_title=phase.title,
-    )
-
-
-def ensure_phase_artifacts(bundle: ArtifactBundle, task_id: str) -> ArtifactBundle:
-    if bundle.scope != "phase-local":
-        return bundle
-    assert bundle.phase_id is not None and bundle.phase_title is not None
-    bundle.artifact_dir.mkdir(parents=True, exist_ok=True)
-    for name, path in bundle.artifact_files.items():
-        if path.exists():
-            continue
-        path.write_text(
-            _phase_artifact_template(task_id, bundle.pair, bundle.phase_id, bundle.phase_title, name),
-            encoding="utf-8",
-        )
-    return bundle
-
-
 def ensure_workspace(
     root: Path,
     task_id: str,
@@ -1898,21 +1625,18 @@ def ensure_workspace(
         if not verifier_prompt_file.exists():
             verifier_prompt_file.write_text(render_task_prompt(PAIR_VERIFIER_PROMPT[pair], task_root_rel), encoding="utf-8")
 
-        if pair == "plan":
-            criteria_file = pair_dir / "criteria.md"
-            if not criteria_file.exists():
-                criteria_file.write_text(PAIR_CRITERIA_TEMPLATES[pair], encoding="utf-8")
+        criteria_file = pair_dir / "criteria.md"
+        if not criteria_file.exists():
+            criteria_file.write_text(PAIR_CRITERIA_TEMPLATES[pair], encoding="utf-8")
 
-            feedback_file = pair_dir / "feedback.md"
-            if not feedback_file.exists():
-                feedback_file.write_text(f"# {PAIR_LABELS[pair]} Feedback\n", encoding="utf-8")
+        feedback_file = pair_dir / "feedback.md"
+        if not feedback_file.exists():
+            feedback_file.write_text(f"# {PAIR_LABELS[pair]} Feedback\n", encoding="utf-8")
 
-            for artifact_name in PAIR_ARTIFACTS[pair]:
-                artifact = pair_dir / artifact_name
-                if not artifact.exists():
-                    artifact.write_text(f"# {artifact_name}\n", encoding="utf-8")
-        else:
-            (pair_dir / "phases").mkdir(parents=True, exist_ok=True)
+        for artifact_name in PAIR_ARTIFACTS[pair]:
+            artifact = pair_dir / artifact_name
+            if not artifact.exists():
+                artifact.write_text(f"# {artifact_name}\n", encoding="utf-8")
 
     return {
         "super_dir": super_dir,
@@ -1949,13 +1673,9 @@ def create_run_paths(runs_dir: Path, run_id: str, request_text: Optional[str], s
 
     summary_file = run_dir / "summary.md"
     request_file = run_dir / "request.md"
-    sessions_dir = run_dir / "sessions"
-    sessions_dir.mkdir(parents=True, exist_ok=True)
-    phases_sessions_dir = sessions_dir / "phases"
-    phases_sessions_dir.mkdir(parents=True, exist_ok=True)
-    plan_state_file = plan_session_file(run_dir)
+    session_file = run_dir / "session.json"
     write_request_snapshot(request_file, request_text)
-    save_session_state(plan_state_file, load_session_state(plan_state_file, session_mode))
+    save_session_state(session_file, load_session_state(session_file, session_mode))
 
     return {
         "run_dir": run_dir,
@@ -1964,8 +1684,7 @@ def create_run_paths(runs_dir: Path, run_id: str, request_text: Optional[str], s
         "events_file": events_file,
         "summary_file": summary_file,
         "request_file": request_file,
-        "sessions_dir": sessions_dir,
-        "plan_session_file": plan_state_file,
+        "session_file": session_file,
     }
 
 
@@ -1982,9 +1701,7 @@ def open_existing_run_paths(
     events_file = run_dir / "events.jsonl"
     summary_file = run_dir / "summary.md"
     request_file = run_dir / "request.md"
-    sessions_dir = run_dir / "sessions"
-    phases_sessions_dir = sessions_dir / "phases"
-    plan_state_file = plan_session_file(run_dir)
+    session_file = run_dir / "session.json"
 
     if not run_log.exists():
         run_log.write_text(f"# Superloop Run Log ({run_id})\n", encoding="utf-8")
@@ -1992,8 +1709,6 @@ def open_existing_run_paths(
         raw_phase_log.write_text(f"# Superloop Raw Phase Log ({run_id})\n", encoding="utf-8")
     if not events_file.exists():
         events_file.write_text("", encoding="utf-8")
-    sessions_dir.mkdir(parents=True, exist_ok=True)
-    phases_sessions_dir.mkdir(parents=True, exist_ok=True)
 
     return {
         "run_dir": run_dir,
@@ -2002,8 +1717,7 @@ def open_existing_run_paths(
         "events_file": events_file,
         "summary_file": summary_file,
         "request_file": request_file,
-        "sessions_dir": sessions_dir,
-        "plan_session_file": plan_state_file,
+        "session_file": session_file,
     }
 
 
@@ -2094,101 +1808,6 @@ def parse_codex_exec_json(raw_output: str) -> Tuple[str, Optional[str]]:
     return "\n\n".join(part.strip() for part in messages if part and part.strip()), thread_id
 
 
-def extract_clarifications(run_raw_phase_log: Path) -> List[Tuple[str, str]]:
-    if not run_raw_phase_log.exists():
-        return []
-    text = run_raw_phase_log.read_text(encoding="utf-8")
-    blocks = text.split("\n\n---\n")
-    clarifications: List[Tuple[str, str]] = []
-    for block in blocks:
-        if "entry=clarification" not in block:
-            continue
-        if "Question:\n" not in block or "\n\nAnswer:\n" not in block:
-            continue
-        body = block.split("---\n", 1)[-1]
-        question, answer = body.split("\n\nAnswer:\n", 1)
-        question = question.replace("Question:\n", "", 1).strip()
-        clarifications.append((question, answer.strip()))
-    return clarifications
-
-
-def prior_phase_status_lines(events_file: Path, selected_phase_ids: Sequence[str]) -> List[str]:
-    if not events_file.exists():
-        return []
-    allowed = set(selected_phase_ids)
-    lines: List[str] = []
-    for raw in events_file.read_text(encoding="utf-8").splitlines():
-        try:
-            event = json.loads(raw)
-        except json.JSONDecodeError:
-            continue
-        phase_id = event.get("phase_id")
-        if not isinstance(phase_id, str) or phase_id not in allowed:
-            continue
-        if event.get("event_type") in {"phase_started", "phase_completed", "phase_blocked", "phase_deferred"}:
-            lines.append(f"{phase_id}: {event.get('event_type')}")
-    return lines
-
-
-def relevant_prior_artifact_paths(task_dir: Path, pair: str, prior_phase_keys: Sequence[str]) -> List[str]:
-    if not prior_phase_keys:
-        return []
-    pair_dir = task_dir / pair / "phases"
-    if not pair_dir.exists():
-        return []
-    repo_root = task_dir.parents[2]
-    paths: List[str] = []
-    for phase_key in prior_phase_keys:
-        entry = pair_dir / phase_key
-        if not entry.is_dir():
-            continue
-        for child in sorted(entry.glob("*.md")):
-            paths.append(str(child.relative_to(repo_root)))
-    return paths
-
-
-def build_fresh_phase_bootstrap(
-    *,
-    request_file: Path,
-    run_raw_phase_log: Path,
-    events_file: Path,
-    task_dir: Path,
-    bundle: ArtifactBundle,
-    active_phase_selection: ResolvedPhaseSelection,
-    prior_phase_ids: Sequence[str],
-    prior_phase_keys: Sequence[str],
-) -> str:
-    assert bundle.phase_dir_key is not None
-    request_text = request_file.read_text(encoding="utf-8").strip()
-    clarifications = extract_clarifications(run_raw_phase_log)
-    clar_lines = [f"Q: {q}\nA: {a}" for q, a in clarifications] or ["(none)"]
-    status_lines = prior_phase_status_lines(events_file, prior_phase_ids) or ["(none)"]
-    prior_paths = relevant_prior_artifact_paths(task_dir, bundle.pair, prior_phase_keys) or ["(none)"]
-    artifact_lines = [f"- {name}: {path}" for name, path in bundle.artifact_files.items()] or ["(none)"]
-    bootstrap = (
-        "\nINITIAL REQUEST SNAPSHOT:\n"
-        f"{request_text or DEFAULT_REQUEST_TEXT}\n"
-        "\nAUTHORITATIVE CLARIFICATIONS TO DATE:\n"
-        + "\n".join(clar_lines)
-        + "\n\nPRIOR PHASE STATUS IN THIS RUN:\n"
-        + "\n".join(status_lines)
-        + "\n\nRELEVANT PRIOR PHASE ARTIFACT PATHS:\n"
-        + "\n".join(prior_paths)
-        + "\n\n"
-        + phase_prompt_context(active_phase_selection)
-        + "\n\nACTIVE PHASE ARTIFACTS:\n"
-        + "\n".join(artifact_lines)
-    )
-    bootstrap_size = len(bootstrap.encode("utf-8"))
-    if bootstrap_size > MAX_FRESH_PHASE_BOOTSTRAP_BYTES:
-        raise ValueError(
-            "Fresh phase bootstrap exceeds "
-            f"{MAX_FRESH_PHASE_BOOTSTRAP_BYTES} UTF-8 bytes ({bootstrap_size} bytes). "
-            "Reduce the request snapshot, clarifications, or prior-phase artifact payload before starting a new phase thread."
-        )
-    return bootstrap
-
-
 def build_phase_prompt(
     *,
     cwd: Path,
@@ -2202,14 +1821,7 @@ def build_phase_prompt(
     run_id: str,
     session_state: SessionState,
     include_request_snapshot: bool,
-    artifact_bundle: Optional[ArtifactBundle] = None,
-    session_file: Path,
-    is_fresh_phase_thread: bool = False,
-    events_file: Optional[Path] = None,
-    task_dir: Optional[Path] = None,
     active_phase_selection: Optional[ResolvedPhaseSelection] = None,
-    prior_phase_ids: Sequence[str] = (),
-    prior_phase_keys: Sequence[str] = (),
 ) -> str:
     base_instructions = prompt_file.read_text(encoding="utf-8")
     request_text = request_file.read_text(encoding="utf-8").strip()
@@ -2250,56 +1862,11 @@ def build_phase_prompt(
                 request_text if request_text else DEFAULT_REQUEST_TEXT,
             ]
         )
-    if artifact_bundle is None:
-        artifact_bundle = ArtifactBundle(
-            pair=pair_name,
-            scope="task-global",
-            artifact_dir=cwd,
-            criteria_file=cwd / "criteria.md",
-            feedback_file=cwd / "feedback.md",
-            artifact_files={},
-            allowed_verifier_prefixes=(),
-        )
-
-    preamble.extend(
-        [
-            f"THREAD SCOPE: {'phase-local' if pair_name in PHASED_PAIRS else 'task-global'}",
-            f"ARTIFACT SCOPE: {artifact_bundle.scope}",
-            f"AUTHORITATIVE ACTIVE ARTIFACT DIRECTORY: {artifact_bundle.artifact_dir}",
-            f"AUTHORITATIVE ACTIVE CRITERIA FILE: {artifact_bundle.criteria_file}",
-            f"AUTHORITATIVE ACTIVE FEEDBACK FILE: {artifact_bundle.feedback_file}",
-            f"AUTHORITATIVE ACTIVE SESSION FILE: {session_file}",
-            "AUTHORITATIVE OTHER ACTIVE ARTIFACT FILES:",
-            *[f"- {path}" for name, path in artifact_bundle.artifact_files.items() if name not in {"criteria.md", "feedback.md"}],
-        ]
-    )
-    if pair_name in PHASED_PAIRS and active_phase_selection is not None and not is_fresh_phase_thread:
+    if pair_name in PHASED_PAIRS and active_phase_selection is not None:
         preamble.extend(
             [
                 "",
                 phase_prompt_context(active_phase_selection),
-            ]
-        )
-    if (
-        is_fresh_phase_thread
-        and pair_name in PHASED_PAIRS
-        and events_file is not None
-        and task_dir is not None
-        and active_phase_selection is not None
-    ):
-        preamble.extend(
-            [
-                "",
-                build_fresh_phase_bootstrap(
-                    request_file=request_file,
-                    run_raw_phase_log=run_raw_phase_log,
-                    events_file=events_file,
-                    task_dir=task_dir,
-                    bundle=artifact_bundle,
-                    active_phase_selection=active_phase_selection,
-                    prior_phase_ids=prior_phase_ids,
-                    prior_phase_keys=prior_phase_keys,
-                ),
             ]
         )
     return "\n".join(preamble) + "\n\nFollow the prompt rules exactly.\n\n" + base_instructions
@@ -2316,14 +1883,9 @@ def run_codex_phase(
     run_id: str,
     request_file: Path,
     session_file: Path,
-    artifact_bundle: ArtifactBundle,
     run_raw_phase_log: Path,
     raw_phase_log: Path,
-    events_file: Path,
-    task_dir: Path,
     active_phase_selection: Optional[ResolvedPhaseSelection] = None,
-    prior_phase_ids: Sequence[str] = (),
-    prior_phase_keys: Sequence[str] = (),
 ) -> str:
     session_state = load_session_state(session_file, "persistent")
     session_state.mode = "persistent"
@@ -2340,14 +1902,7 @@ def run_codex_phase(
         run_id=run_id,
         session_state=session_state,
         include_request_snapshot=include_request_snapshot,
-        artifact_bundle=artifact_bundle,
-        session_file=session_file,
-        is_fresh_phase_thread=include_request_snapshot and pair_name in PHASED_PAIRS,
-        events_file=events_file,
-        task_dir=task_dir,
         active_phase_selection=active_phase_selection,
-        prior_phase_ids=prior_phase_ids,
-        prior_phase_keys=prior_phase_keys,
     )
 
     if session_state.thread_id:
@@ -2996,8 +2551,8 @@ def execute_pair_cycles(
     pair: str,
     prompt_file: Path,
     verifier_prompt_file: Path,
-    artifact_bundle: ArtifactBundle,
-    session_file: Path,
+    criteria_file: Path,
+    feedback_file: Path,
     root: Path,
     codex_command: CodexCommandConfig,
     run_id: str,
@@ -3011,8 +2566,6 @@ def execute_pair_cycles(
     args: argparse.Namespace,
     resume_checkpoint: Optional[ResumeCheckpoint],
     use_resume_state: bool,
-    prior_phase_ids: Sequence[str] = (),
-    prior_phase_keys: Sequence[str] = (),
 ) -> Tuple[str, int]:
     print(f"\n===== Pair: {PAIR_LABELS[pair]} =====")
     append_run_log(paths["run_log"], f"Started pair `{pair}`", run_id=run_id, pair=pair)
@@ -3025,7 +2578,7 @@ def execute_pair_cycles(
 
     cycle = 0
     attempt_counts: Dict[int, int] = {}
-    active_phase_id = artifact_bundle.phase_id if artifact_bundle.scope == "phase-local" else None
+    active_phase_id = active_phase_selection.phase_ids[0] if active_phase_selection else None
     if use_resume_state and resume_checkpoint is not None:
         if active_phase_id is None:
             cycle = resume_checkpoint.cycle_by_pair.get(pair, 0)
@@ -3068,15 +2621,10 @@ def execute_pair_cycles(
             attempt_num,
             run_id,
             run_paths["request_file"],
-            session_file,
-            artifact_bundle,
+            run_paths["session_file"],
             run_paths["raw_phase_log"],
             paths["raw_phase_log"],
-            run_paths["events_file"],
-            paths["task_dir"],
             active_phase_selection=active_phase_selection if pair in PHASED_PAIRS else None,
-            prior_phase_ids=prior_phase_ids,
-            prior_phase_keys=prior_phase_keys,
         )
         recorder.emit(
             "phase_finished",
@@ -3092,11 +2640,7 @@ def execute_pair_cycles(
             warn(f"{pair} producer returned empty stdout (cycle {cycle_num}, attempt {attempt_num}).")
         producer_control = parse_phase_control(producer_stdout, "producer", pair)
         producer_decision = decide_producer_control(producer_control)
-        producer_delta = (
-            filter_volatile_task_run_paths(changed_paths_from_snapshot(root, producer_baseline), task_root_rel)
-            if use_git
-            else set()
-        )
+        producer_delta = changed_paths_from_snapshot(root, producer_baseline) if use_git else set()
 
         if producer_decision.action == "question":
             recorder.emit("question", pair=pair, phase="producer", cycle=cycle_num, attempt=attempt_num)
@@ -3111,7 +2655,7 @@ def execute_pair_cycles(
             append_clarification(
                 run_paths["raw_phase_log"],
                 paths["raw_phase_log"],
-                session_file,
+                run_paths["session_file"],
                 pair,
                 "producer",
                 cycle_num,
@@ -3150,15 +2694,10 @@ def execute_pair_cycles(
             attempt_num,
             run_id,
             run_paths["request_file"],
-            session_file,
-            artifact_bundle,
+            run_paths["session_file"],
             run_paths["raw_phase_log"],
             paths["raw_phase_log"],
-            run_paths["events_file"],
-            paths["task_dir"],
             active_phase_selection=active_phase_selection if pair in PHASED_PAIRS else None,
-            prior_phase_ids=prior_phase_ids,
-            prior_phase_keys=prior_phase_keys,
         )
         recorder.emit(
             "phase_finished",
@@ -3175,13 +2714,9 @@ def execute_pair_cycles(
         verifier_control = parse_phase_control(verifier_stdout, "verifier", pair)
         verifier_decision = decide_verifier_control(
             verifier_control,
-            criteria_checked=criteria_all_checked(artifact_bundle.criteria_file),
+            criteria_checked=criteria_all_checked(criteria_file),
         )
-        verifier_delta = (
-            filter_volatile_task_run_paths(changed_paths_from_snapshot(root, verifier_baseline), task_root_rel)
-            if use_git
-            else set()
-        )
+        verifier_delta = changed_paths_from_snapshot(root, verifier_baseline) if use_git else set()
 
         if verifier_decision.action == "question":
             recorder.emit("question", pair=pair, phase="verifier", cycle=cycle_num, attempt=attempt_num)
@@ -3196,7 +2731,7 @@ def execute_pair_cycles(
             append_clarification(
                 run_paths["raw_phase_log"],
                 paths["raw_phase_log"],
-                session_file,
+                run_paths["session_file"],
                 pair,
                 "verifier",
                 cycle_num,
@@ -3210,27 +2745,27 @@ def execute_pair_cycles(
                 commit_tracked_changes(root, f"superloop: answered verifier question ({pair} #{cycle_num})", pair_tracked)
             continue
 
-        violations = verifier_scope_violations(artifact_bundle, verifier_delta, task_root_rel) if use_git else []
+        violations = verifier_scope_violations(pair, verifier_delta, task_root_rel) if use_git else []
         if use_git and violations:
             preview = ", ".join(violations[:8])
             if len(violations) > 8:
                 preview += ", ..."
             warn(
-                f"{pair} verifier edited files outside recommended scope ({artifact_bundle.artifact_dir}): {preview}. Continuing in lax guard mode."
+                f"{pair} verifier edited files outside recommended scope ({task_root_rel}/{pair}/): {preview}. Continuing in lax guard mode."
             )
 
         if verifier_control.promise is None:
             recorder.emit("missing_promise_default", pair=pair, cycle=cycle_num, attempt=attempt_num)
-            with artifact_bundle.feedback_file.open("a", encoding="utf-8") as f:
+            with feedback_file.open("a", encoding="utf-8") as f:
                 f.write(
                     f"\n\n## System Warning (cycle {cycle_num})\n"
                     f"{verifier_decision.warning}\n"
                 )
-            verifier_delta.add(repo_relative_path(root, artifact_bundle.feedback_file))
+            verifier_delta.add(repo_relative_path(root, feedback_file))
 
         if verifier_control.promise == PROMISE_COMPLETE and verifier_decision.warning:
             warn(f"{pair} {verifier_decision.warning}")
-            verifier_delta.add(repo_relative_path(root, artifact_bundle.feedback_file))
+            verifier_delta.add(repo_relative_path(root, feedback_file))
 
         if verifier_decision.action == "complete":
             print(f"[SUCCESS] Pair `{pair}` completed.")
@@ -3408,8 +2943,8 @@ def main() -> int:
             )
         resume_checkpoint = load_resume_checkpoint(run_paths["events_file"], enabled_pairs)
         recorder = EventRecorder(run_id=run_id, events_file=run_paths["events_file"], sequence=resume_checkpoint.last_sequence)
-        if run_paths["plan_session_file"].exists():
-            session_state = load_session_state(run_paths["plan_session_file"], "persistent")
+        if run_paths["session_file"].exists():
+            session_state = load_session_state(run_paths["session_file"], "persistent")
             session_state.mode = "persistent"
         else:
             session_state = SessionState(
@@ -3418,7 +2953,7 @@ def main() -> int:
                 pending_clarification_note=None,
                 created_at=datetime.now(timezone.utc).isoformat(),
             )
-            save_session_state(run_paths["plan_session_file"], session_state)
+            save_session_state(run_paths["session_file"], session_state)
         if not session_state.thread_id:
             session_notice = "No stored Codex thread id is available; resuming with a new conversation for the next phase."
             warn(session_notice)
@@ -3431,12 +2966,12 @@ def main() -> int:
                 session_notice,
                 entry="session_recovery",
             )
-            save_session_state(run_paths["plan_session_file"], session_state)
+            save_session_state(run_paths["session_file"], session_state)
     else:
         run_id = create_run_id()
         run_paths = create_run_paths(paths["runs_dir"], run_id, resolved_request_text, session_mode="persistent")
         recorder = EventRecorder(run_id=run_id, events_file=run_paths["events_file"])
-        session_state = load_session_state(run_paths["plan_session_file"], "persistent")
+        session_state = load_session_state(run_paths["session_file"], "persistent")
     run_status = "running"
 
     if use_git and not args.resume:
@@ -3512,22 +3047,13 @@ def main() -> int:
                 plan_pair_index = -1
             should_run_plan_pair = plan_pair_index >= 0 and plan_pair_index >= resume_checkpoint.pair_start_index
         if should_run_plan_pair:
-            ensure_phase_plan_scaffold(paths["task_dir"], task_id, run_paths["request_file"])
-            plan_bundle = resolve_artifact_bundle(
-                root=root,
-                task_dir=paths["task_dir"],
-                task_id=task_id,
-                task_root_rel=task_root_rel,
-                pair="plan",
-                active_phase_selection=None,
-            )
             plan_result, plan_exit = execute_pair_cycles(
                 pair_cfg=plan_cfg,
                 pair="plan",
                 prompt_file=paths["pair_plan"] / "prompt.md",
                 verifier_prompt_file=paths["pair_plan"] / "verifier_prompt.md",
-                artifact_bundle=plan_bundle,
-                session_file=run_paths["plan_session_file"],
+                criteria_file=paths["pair_plan"] / "criteria.md",
+                feedback_file=paths["pair_plan"] / "feedback.md",
                 root=root,
                 codex_command=codex_command,
                 run_id=run_id,
@@ -3642,18 +3168,8 @@ def main() -> int:
                         pair=pair,
                         prompt_file=paths[f"pair_{pair}"] / "prompt.md",
                         verifier_prompt_file=paths[f"pair_{pair}"] / "verifier_prompt.md",
-                        artifact_bundle=ensure_phase_artifacts(
-                            resolve_artifact_bundle(
-                                root=root,
-                                task_dir=paths["task_dir"],
-                                task_id=task_id,
-                                task_root_rel=task_root_rel,
-                                pair=pair,
-                                active_phase_selection=current_phase_selection,
-                            ),
-                            task_id,
-                        ),
-                        session_file=resolve_session_file(pair, current_phase_selection, run_paths["run_dir"]),
+                        criteria_file=paths[f"pair_{pair}"] / "criteria.md",
+                        feedback_file=paths[f"pair_{pair}"] / "feedback.md",
                         root=root,
                         codex_command=codex_command,
                         run_id=run_id,
@@ -3667,10 +3183,6 @@ def main() -> int:
                         args=args,
                         resume_checkpoint=resume_checkpoint,
                         use_resume_state=bool(args.resume and phase_index == starting_phase_index),
-                        prior_phase_ids=active_phase_selection.phase_ids[:phase_index],
-                        prior_phase_keys=tuple(
-                            phase_dir_key(phase_id) for phase_id in active_phase_selection.phase_ids[:phase_index]
-                        ),
                     )
                     resume_checkpoint = None
                     if result == "blocked":

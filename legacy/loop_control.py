@@ -22,7 +22,7 @@ PROMISE_LINE_RE = re.compile(
     r"^\s*<promise>(COMPLETE|INCOMPLETE|BLOCKED)</promise>\s*$",
     re.IGNORECASE,
 )
-UNCHECKED_BOX_RE = re.compile(r"^\s*-\s\[ \]", re.MULTILINE)
+UNCHECKED_BOX_RE = re.compile(r"^- \[ \]", re.MULTILINE)
 
 
 class LoopControlParseError(ValueError):

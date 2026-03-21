@@ -1,0 +1,4 @@
+{"ts": "2026-03-21T16:53:32.361765+00:00", "run_id": "run-20260321T165332Z-5a03f021", "seq": 1, "event_type": "run_started", "workspace": "/workspace/superloop", "pairs": ["plan"], "max_iterations": 1, "use_git": true, "task_id": "prd-phase-local", "task_root": ".superloop/tasks/prd-phase-local"}
+{"ts": "2026-03-21T16:53:32.361971+00:00", "run_id": "run-20260321T165332Z-5a03f021", "seq": 2, "event_type": "pair_started", "pair": "plan", "phase_id": null}
+{"ts": "2026-03-21T16:53:32.362031+00:00", "run_id": "run-20260321T165332Z-5a03f021", "seq": 3, "event_type": "cycle_started", "pair": "plan", "cycle": 1, "attempt": 1, "phase_id": null}
+{"ts": "2026-03-21T16:55:27.723480+00:00", "run_id": "run-20260321T165332Z-5a03f021", "seq": 4, "event_type": "phase_finished", "pair": "plan", "phase": "producer", "cycle": 1, "attempt": 1, "empty_output": false, "phase_id": null}

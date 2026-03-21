@@ -1,0 +1,3 @@
+# Implement ↔ Code Reviewer Feedback
+
+2026-03-21 reviewer note: No blocking or non-blocking findings. The built-in implement/test producer and verifier prompt templates now point future phased workspaces at active-phase artifacts, the README layout matches the phase-local filesystem/session contract, and the focused observability suite still passes (`67 passed`). The remaining `build_phase_prompt(...)` fallback to `cwd / "session.json"` is an internal default path, not user-facing prompt or README text, and the real phased execution path now asserts the injected `sessions/phases/<phase-dir-key>.json` session file explicitly.
