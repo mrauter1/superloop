@@ -681,6 +681,7 @@ def test_append_run_log_scopes_entries(tmp_path: Path):
 
 
 def test_main_fatal_error_still_writes_terminal_event_and_summary(tmp_path: Path, monkeypatch):
+    install_fake_yaml(monkeypatch)
     monkeypatch.setattr(superloop, "check_dependencies", lambda require_git=True: None)
     monkeypatch.setattr(superloop, "resolve_codex_exec_command", lambda model: fake_codex_command())
     monkeypatch.setattr(
@@ -936,6 +937,7 @@ def test_ensure_workspace_accepts_long_intent_derived_task_ids(tmp_path: Path):
 
 
 def test_resume_accepts_long_explicit_task_id(tmp_path: Path, monkeypatch):
+    install_fake_yaml(monkeypatch)
     task_id = "implement-refined-reflow-v1-2-sad-md-as-function-d391842d"
     paths = ensure_workspace(
         root=tmp_path,
@@ -1031,6 +1033,33 @@ def test_ensure_workspace_creates_task_scoped_paths_and_task_prompts(tmp_path: P
     assert ".superloop/tasks/my-task/test/phases/<phase-dir-key>/feedback.md" in test_verifier_prompt
     assert ".superloop/tasks/my-task/test/criteria.md" not in test_verifier_prompt
     assert ".superloop/tasks/my-task/test/feedback.md" not in test_verifier_prompt
+
+
+
+
+def test_ensure_workspace_fails_fast_when_prompt_template_missing(tmp_path: Path, monkeypatch):
+    import pytest
+
+    templates = tmp_path / "templates"
+    templates.mkdir()
+    for pair, role_files in superloop.PAIR_TEMPLATE_FILES.items():
+        for role in ("producer", "verifier"):
+            filename = role_files[role]
+            (templates / filename).write_text(f"# {pair} {role}\n", encoding="utf-8")
+        (templates / role_files["criteria"]).write_text(f"# {pair} criteria\n", encoding="utf-8")
+
+    (templates / "plan_producer.md").unlink()
+    monkeypatch.setattr(superloop, "TEMPLATES_DIR", templates)
+    superloop.load_pair_templates.cache_clear()
+
+    with pytest.raises(SystemExit):
+        ensure_workspace(
+            root=tmp_path,
+            task_id="my-task",
+            product_intent="Implement feature X",
+            intent_mode="replace",
+        )
+    superloop.load_pair_templates.cache_clear()
 
 
 def test_ensure_phase_plan_scaffold_restores_runtime_metadata_and_preserves_phases(tmp_path: Path, monkeypatch):
@@ -1522,6 +1551,7 @@ def test_append_clarification_logs_to_raw_phase_log_and_updates_session(tmp_path
 
 
 def test_main_resume_without_session_file_starts_new_conversation_and_logs_notice(tmp_path: Path, monkeypatch):
+    install_fake_yaml(monkeypatch)
     paths = ensure_workspace(
         root=tmp_path,
         task_id="legacy-run",
@@ -1573,6 +1603,7 @@ def test_main_resume_without_session_file_starts_new_conversation_and_logs_notic
 
 
 def test_main_resume_with_missing_thread_id_starts_new_conversation_and_logs_notice(tmp_path: Path, monkeypatch):
+    install_fake_yaml(monkeypatch)
     paths = ensure_workspace(
         root=tmp_path,
         task_id="legacy-run",
@@ -1635,6 +1666,7 @@ def test_main_resume_with_missing_thread_id_starts_new_conversation_and_logs_not
 
 
 def test_main_resume_reconstructs_missing_request_from_legacy_context_not_current_task_request(tmp_path: Path, monkeypatch):
+    install_fake_yaml(monkeypatch)
     paths = ensure_workspace(
         root=tmp_path,
         task_id="legacy-run",
