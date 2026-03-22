@@ -575,7 +575,9 @@ def remove_trailing_empty_decisions_block(
         return False
     if trailing.body.strip():
         return False
-    decisions_path.write_text(text[: trailing.start_offset], encoding="utf-8")
+    truncate_offset = len(text[: trailing.start_offset].encode("utf-8"))
+    with decisions_path.open("r+b") as handle:
+        handle.truncate(truncate_offset)
     return True
 
 

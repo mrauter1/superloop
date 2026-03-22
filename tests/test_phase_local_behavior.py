@@ -30,6 +30,7 @@ from superloop import (
     prior_phase_status_lines,
     resolve_artifact_bundle,
     resolve_session_file,
+    remove_trailing_empty_decisions_block,
     tracked_superloop_paths,
     verifier_scope_violations,
 )
@@ -416,3 +417,31 @@ def test_filter_volatile_task_run_paths_keeps_non_run_phase_artifacts():
         ".superloop/tasks/task/implement/phases/phase-a/implementation_notes.md",
         ".superloop/tasks/task/test/phases/phase-a/test_strategy.md",
     }
+
+
+def test_remove_trailing_empty_decisions_block_truncates_utf8_safely(tmp_path: Path):
+    decisions = tmp_path / "decisions.txt"
+    decisions.write_text(
+        (
+            '<superloop-decisions-header version="1" block_seq="1" owner="planner" '
+            'phase_id="task-global" pair="plan" turn_seq="1" run_id="run-1" ts="2026-03-22T00:00:00+00:00" />\n'
+            "Keep café behavior stable\n"
+            '<superloop-decisions-header version="1" block_seq="2" owner="planner" '
+            'phase_id="task-global" pair="plan" turn_seq="2" run_id="run-1" ts="2026-03-22T00:01:00+00:00" />\n'
+        ),
+        encoding="utf-8",
+    )
+
+    removed = remove_trailing_empty_decisions_block(
+        decisions,
+        owner="planner",
+        pair="plan",
+        phase_id="task-global",
+        turn_seq=2,
+        run_id="run-1",
+    )
+
+    assert removed is True
+    remaining = decisions.read_text(encoding="utf-8")
+    assert "Keep café behavior stable\n" in remaining
+    assert 'block_seq="2"' not in remaining
