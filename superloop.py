@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import html
 import json
 import re
 import shutil
@@ -20,7 +21,7 @@ from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 try:
     import yaml
@@ -46,12 +47,12 @@ PAIR_LABELS = {
 }
 
 PLAN_GLOBAL_ARTIFACTS = ("criteria.md", "feedback.md", "plan.md", "phase_plan.yaml")
-IMPLEMENT_PHASE_LOCAL_ARTIFACTS = ("criteria.md", "feedback.md", "implementation_notes.md", "review_findings.md")
-TEST_PHASE_LOCAL_ARTIFACTS = ("criteria.md", "feedback.md", "test_strategy.md", "test_gaps.md")
+IMPLEMENT_PHASE_LOCAL_ARTIFACTS = ("criteria.md", "feedback.md", "implementation_notes.md")
+TEST_PHASE_LOCAL_ARTIFACTS = ("criteria.md", "feedback.md", "test_strategy.md")
 PAIR_ARTIFACTS = {
     "plan": ["plan.md"],
-    "implement": ["implementation_notes.md", "review_findings.md"],
-    "test": ["test_strategy.md", "test_gaps.md"],
+    "implement": ["implementation_notes.md"],
+    "test": ["test_strategy.md"],
 }
 
 PHASED_PAIRS = frozenset({"implement", "test"})
@@ -91,6 +92,15 @@ PAIR_TEMPLATE_FILES = {
     },
     "test": {"producer": "test_producer.md", "verifier": "test_verifier.md", "criteria": "test_criteria.md"},
 }
+DECISIONS_HEADER_PREFIX = "<superloop-decisions-header "
+DECISIONS_HEADER_SUFFIX = " />"
+DECISIONS_VERSION = "1"
+PLAN_DECISIONS_PHASE_ID = "task-global"
+DECISIONS_ROLE_BY_PAIR = {
+    "plan": "planner",
+    "implement": "implementer",
+    "test": "test_author",
+}
 
 
 @lru_cache(maxsize=1)
@@ -112,6 +122,16 @@ def load_pair_templates() -> Tuple[Dict[str, str], Dict[str, str], Dict[str, str
         verifier_templates[pair] = verifier_path.read_text(encoding="utf-8")
         criteria_templates[pair] = criteria_path.read_text(encoding="utf-8")
     return producer_templates, verifier_templates, criteria_templates
+
+
+def pair_template_path(pair: str, role: str) -> Path:
+    return TEMPLATES_DIR / PAIR_TEMPLATE_FILES[pair][role]
+
+
+def rendered_pair_template(pair: str, role: str, task_root_rel: str) -> Tuple[str, str]:
+    producer_templates, verifier_templates, _criteria_templates = load_pair_templates()
+    template_text = producer_templates[pair] if role == "producer" else verifier_templates[pair]
+    return str(pair_template_path(pair, role)), render_task_prompt(template_text, task_root_rel)
 
 
 
@@ -288,6 +308,15 @@ class ArtifactBundle:
     phase_title: Optional[str] = None
 
 
+@dataclass(frozen=True)
+class DecisionsBlock:
+    attrs: Dict[str, str]
+    start_offset: int
+    header_end_offset: int
+    end_offset: int
+    body: str
+
+
 class PhasePlanError(ValueError):
     """Raised when phase-plan state is invalid or ambiguous."""
 
@@ -324,6 +353,230 @@ def normalize_repo_path(path_text: str) -> str:
     if " -> " in cleaned:
         cleaned = cleaned.split(" -> ", 1)[1]
     return cleaned
+
+
+def decisions_file(task_dir: Path) -> Path:
+    return task_dir / "decisions.txt"
+
+
+def decisions_phase_id(pair: str, artifact_bundle: ArtifactBundle) -> str:
+    if pair == "plan":
+        return PLAN_DECISIONS_PHASE_ID
+    if artifact_bundle.phase_id:
+        return artifact_bundle.phase_id
+    return IMPLICIT_PHASE_ID
+
+
+def decisions_owner(pair: str) -> str:
+    return DECISIONS_ROLE_BY_PAIR[pair]
+
+
+def parse_decisions_headers(text: str) -> List[DecisionsBlock]:
+    lines = text.splitlines(keepends=True)
+    headers: List[Tuple[int, int, int, Dict[str, str]]] = []
+    offset = 0
+    for line in lines:
+        stripped = line.rstrip("\r\n")
+        if stripped.startswith(DECISIONS_HEADER_PREFIX) and stripped.endswith("/>"):
+            attrs = {
+                match.group(1): html.unescape(match.group(2))
+                for match in re.finditer(r'([a-z_]+)="([^"]*)"', stripped)
+            }
+            headers.append((offset, offset + len(line), len(headers), attrs))
+        offset += len(line)
+
+    blocks: List[DecisionsBlock] = []
+    for idx, (start_offset, header_end_offset, _header_idx, attrs) in enumerate(headers):
+        end_offset = headers[idx + 1][0] if idx + 1 < len(headers) else len(text)
+        blocks.append(
+            DecisionsBlock(
+                attrs=attrs,
+                start_offset=start_offset,
+                header_end_offset=header_end_offset,
+                end_offset=end_offset,
+                body=text[header_end_offset:end_offset],
+            )
+        )
+    return blocks
+
+
+def _decisions_text(path: Path) -> str:
+    if not path.exists():
+        return ""
+    return path.read_text(encoding="utf-8")
+
+
+def _next_decisions_sequence(
+    decisions_path: Path,
+    attr_name: str,
+    *,
+    matcher: Optional[Callable[[DecisionsBlock], bool]] = None,
+) -> int:
+    blocks = parse_decisions_headers(_decisions_text(decisions_path))
+    values: List[int] = []
+    for block in blocks:
+        if matcher is not None and not matcher(block):
+            continue
+        raw_value = block.attrs.get(attr_name)
+        if raw_value is None:
+            continue
+        try:
+            values.append(int(raw_value))
+        except ValueError:
+            continue
+    return (max(values) + 1) if values else 1
+
+
+def next_decisions_block_seq(decisions_path: Path) -> int:
+    return _next_decisions_sequence(decisions_path, "block_seq")
+
+
+def next_decisions_qa_seq(decisions_path: Path) -> int:
+    return _next_decisions_sequence(decisions_path, "qa_seq")
+
+
+def next_decisions_turn_seq(decisions_path: Path, *, run_id: str, pair: str, phase_id: str) -> int:
+    return _next_decisions_sequence(
+        decisions_path,
+        "turn_seq",
+        matcher=lambda block: (
+            block.attrs.get("run_id") == run_id
+            and block.attrs.get("pair") == pair
+            and block.attrs.get("phase_id") == phase_id
+        ),
+    )
+
+
+def _format_decisions_header(attrs: Dict[str, object]) -> str:
+    ordered_keys = (
+        "version",
+        "block_seq",
+        "owner",
+        "phase_id",
+        "pair",
+        "turn_seq",
+        "run_id",
+        "ts",
+        "entry",
+        "qa_seq",
+        "source",
+    )
+    serialized: List[str] = []
+    for key in ordered_keys:
+        value = attrs.get(key)
+        if value is None:
+            continue
+        serialized.append(f'{key}="{html.escape(str(value), quote=True)}"')
+    return f"{DECISIONS_HEADER_PREFIX}{' '.join(serialized)}{DECISIONS_HEADER_SUFFIX}"
+
+
+def _append_decisions_text(decisions_path: Path, chunk: str) -> None:
+    decisions_path.parent.mkdir(parents=True, exist_ok=True)
+    existing = _decisions_text(decisions_path)
+    prefix = ""
+    if existing and not existing.endswith("\n"):
+        prefix = "\n"
+    with decisions_path.open("a", encoding="utf-8") as handle:
+        handle.write(prefix + chunk)
+
+
+def append_decisions_header(
+    decisions_path: Path,
+    *,
+    owner: str,
+    pair: str,
+    phase_id: str,
+    turn_seq: int,
+    run_id: str,
+    ts: Optional[str] = None,
+    entry: Optional[str] = None,
+    qa_seq: Optional[int] = None,
+    source: Optional[str] = None,
+) -> int:
+    block_seq = next_decisions_block_seq(decisions_path)
+    if ts is None:
+        ts = datetime.now(timezone.utc).isoformat()
+    header = _format_decisions_header(
+        {
+            "version": DECISIONS_VERSION,
+            "block_seq": block_seq,
+            "owner": owner,
+            "phase_id": phase_id,
+            "pair": pair,
+            "turn_seq": turn_seq,
+            "run_id": run_id,
+            "ts": ts,
+            "entry": entry,
+            "qa_seq": qa_seq,
+            "source": source,
+        }
+    )
+    _append_decisions_text(decisions_path, f"{header}\n")
+    return block_seq
+
+
+def append_decisions_runtime_block(
+    decisions_path: Path,
+    *,
+    pair: str,
+    phase_id: str,
+    run_id: str,
+    entry: str,
+    body: str,
+    turn_seq: Optional[int] = None,
+    qa_seq: Optional[int] = None,
+    source: Optional[str] = None,
+    ts: Optional[str] = None,
+) -> Tuple[int, int]:
+    if turn_seq is None:
+        turn_seq = next_decisions_turn_seq(decisions_path, run_id=run_id, pair=pair, phase_id=phase_id)
+    if qa_seq is None:
+        qa_seq = next_decisions_qa_seq(decisions_path)
+    append_decisions_header(
+        decisions_path,
+        owner="runtime",
+        pair=pair,
+        phase_id=phase_id,
+        turn_seq=turn_seq,
+        run_id=run_id,
+        ts=ts,
+        entry=entry,
+        qa_seq=qa_seq,
+        source=source,
+    )
+    normalized_body = body if body.endswith("\n") else f"{body}\n"
+    _append_decisions_text(decisions_path, normalized_body)
+    return turn_seq, qa_seq
+
+
+def remove_trailing_empty_decisions_block(
+    decisions_path: Path,
+    *,
+    owner: str,
+    pair: str,
+    phase_id: str,
+    turn_seq: int,
+    run_id: str,
+) -> bool:
+    text = _decisions_text(decisions_path)
+    blocks = parse_decisions_headers(text)
+    if not blocks:
+        return False
+    trailing = blocks[-1]
+    if trailing.attrs.get("owner") != owner:
+        return False
+    if trailing.attrs.get("pair") != pair:
+        return False
+    if trailing.attrs.get("phase_id") != phase_id:
+        return False
+    if trailing.attrs.get("run_id") != run_id:
+        return False
+    if trailing.attrs.get("turn_seq") != str(turn_seq):
+        return False
+    if trailing.body.strip():
+        return False
+    decisions_path.write_text(text[: trailing.start_offset], encoding="utf-8")
+    return True
 
 
 def phase_plan_file(task_dir: Path) -> Path:
@@ -681,19 +934,27 @@ def allowed_verifier_paths(bundle: ArtifactBundle, task_root: str) -> List[str]:
     return list(bundle.allowed_verifier_prefixes)
 
 
-def superloop_artifact_paths(task_root: str) -> List[str]:
-    """Returns repo-relative paths owned by Superloop orchestration."""
+def tracked_superloop_artifact_paths(task_root: str) -> List[str]:
+    """Returns repo-relative task-scoped artifacts that Superloop tracks and may stage."""
     return [
         f"{task_root}/task.json",
-        f"{task_root}/run_log.md",
+        f"{task_root}/raw_phase_log.md",
+        f"{task_root}/decisions.txt",
+    ]
+
+
+def verifier_exempt_runtime_artifact_paths(task_root: str) -> List[str]:
+    """Returns repo-relative runtime bookkeeping paths exempt from verifier scope checks."""
+    return [
+        f"{task_root}/task.json",
         f"{task_root}/raw_phase_log.md",
         f"{task_root}/runs/",
     ]
 
 
-def is_superloop_artifact_path(path: str, task_root: str) -> bool:
-    """Returns whether a path is a Superloop-owned artifact."""
-    for artifact in superloop_artifact_paths(task_root):
+def is_verifier_exempt_runtime_artifact_path(path: str, task_root: str) -> bool:
+    """Returns whether a path is verifier-exempt runtime bookkeeping."""
+    for artifact in verifier_exempt_runtime_artifact_paths(task_root):
         if artifact.endswith("/"):
             if path.startswith(artifact):
                 return True
@@ -704,7 +965,7 @@ def is_superloop_artifact_path(path: str, task_root: str) -> bool:
 
 
 def verifier_scope_violations(bundle: ArtifactBundle | str, verifier_delta: Set[str], task_root: str) -> List[str]:
-    """Returns verifier writes that are outside its allowed scope and not orchestrator artifacts."""
+    """Returns verifier writes that are outside allowed scope and not runtime bookkeeping."""
     if isinstance(bundle, str):
         legacy_prefix = f"{task_root}/{bundle}/"
         allowed = (legacy_prefix,)
@@ -713,13 +974,13 @@ def verifier_scope_violations(bundle: ArtifactBundle | str, verifier_delta: Set[
     return sorted(
         path
         for path in verifier_delta
-        if not path.startswith(allowed) and not is_superloop_artifact_path(path, task_root)
+        if not path.startswith(allowed) and not is_verifier_exempt_runtime_artifact_path(path, task_root)
     )
 
 
 def tracked_superloop_paths(task_root: str, pair: Optional[str] = None) -> List[str]:
     """Returns paths that Superloop may stage/commit."""
-    shared_paths = [path for path in superloop_artifact_paths(task_root) if path != f"{task_root}/runs/"]
+    shared_paths = tracked_superloop_artifact_paths(task_root)
     if pair is None:
         pair_paths = [f"{task_root}/{name}/" for name in PAIR_ORDER]
     else:
@@ -1229,8 +1490,6 @@ def reconstruct_legacy_request_snapshot(request_file: Path, legacy_context_file:
 
 
 def append_runtime_notice(
-    task_run_log: Path,
-    run_run_log: Path,
     task_raw_phase_log: Path,
     run_raw_phase_log: Path,
     run_id: str,
@@ -1238,8 +1497,6 @@ def append_runtime_notice(
     *,
     entry: str,
 ):
-    append_run_log(task_run_log, message, run_id=run_id)
-    append_run_log(run_run_log, message, run_id=run_id)
     append_runtime_raw_log(task_raw_phase_log, run_id, entry, message)
     append_runtime_raw_log(run_raw_phase_log, run_id, entry, message)
 
@@ -1520,9 +1777,7 @@ def _phase_artifact_template(task_id: str, pair: str, phase_id: str, phase_title
         "criteria.md": "Criteria",
         "feedback.md": f"{PAIR_LABELS[pair]} Feedback",
         "implementation_notes.md": "Implementation Notes",
-        "review_findings.md": "Review Findings",
         "test_strategy.md": "Test Strategy",
-        "test_gaps.md": "Test Gaps",
     }
     scope = (
         "phase-local authoritative verifier artifact"
@@ -1573,13 +1828,7 @@ def resolve_artifact_bundle(
         criteria_file=mapping["criteria.md"],
         feedback_file=mapping["feedback.md"],
         artifact_files=mapping,
-        allowed_verifier_prefixes=(
-            f"{task_root_rel}/{pair}/phases/{key}/",
-            f"{task_root_rel}/runs/",
-            f"{task_root_rel}/run_log.md",
-            f"{task_root_rel}/raw_phase_log.md",
-            f"{task_root_rel}/task.json",
-        ),
+        allowed_verifier_prefixes=(f"{task_root_rel}/{pair}/phases/{key}/",),
         phase_id=phase_id,
         phase_dir_key=key,
         phase_title=phase.title,
@@ -1607,7 +1856,7 @@ def ensure_workspace(
     product_intent: Optional[str],
     intent_mode: str,
 ) -> Dict[str, Path]:
-    producer_prompts, verifier_prompts, criteria_templates = load_pair_templates()
+    _producer_prompts, _verifier_prompts, criteria_templates = load_pair_templates()
 
     super_dir = root / ".superloop"
     super_dir.mkdir(parents=True, exist_ok=True)
@@ -1619,13 +1868,13 @@ def ensure_workspace(
     task_dir.mkdir(parents=True, exist_ok=True)
     task_root_rel = repo_relative_path(root, task_dir)
 
-    run_log = task_dir / "run_log.md"
-    if not run_log.exists():
-        run_log.write_text("# Superloop Run Log\n", encoding="utf-8")
-
     raw_phase_log = task_dir / "raw_phase_log.md"
     if not raw_phase_log.exists():
         raw_phase_log.write_text("# Superloop Raw Phase Log\n", encoding="utf-8")
+
+    shared_decisions_file = decisions_file(task_dir)
+    if not shared_decisions_file.exists():
+        shared_decisions_file.write_text("", encoding="utf-8")
 
     runs_dir = task_dir / "runs"
     runs_dir.mkdir(parents=True, exist_ok=True)
@@ -1658,14 +1907,6 @@ def ensure_workspace(
         pair_dir.mkdir(parents=True, exist_ok=True)
         pair_dirs[pair] = pair_dir
 
-        prompt_file = pair_dir / "prompt.md"
-        if not prompt_file.exists():
-            prompt_file.write_text(render_task_prompt(producer_prompts[pair], task_root_rel), encoding="utf-8")
-
-        verifier_prompt_file = pair_dir / "verifier_prompt.md"
-        if not verifier_prompt_file.exists():
-            verifier_prompt_file.write_text(render_task_prompt(verifier_prompts[pair], task_root_rel), encoding="utf-8")
-
         if pair == "plan":
             criteria_file = pair_dir / "criteria.md"
             if not criteria_file.exists():
@@ -1690,8 +1931,8 @@ def ensure_workspace(
         "task_root_rel": Path(task_root_rel),
         "task_id": task_id,
         "runs_dir": runs_dir,
-        "run_log": run_log,
         "raw_phase_log": raw_phase_log,
+        "decisions_file": shared_decisions_file,
         "legacy_context_file": legacy_context_file,
         **{f"pair_{k}": v for k, v in pair_dirs.items()},
     }
@@ -1706,16 +1947,12 @@ def create_run_paths(runs_dir: Path, run_id: str, request_text: Optional[str], s
     run_dir = runs_dir / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    run_log = run_dir / "run_log.md"
-    run_log.write_text(f"# Superloop Run Log ({run_id})\n", encoding="utf-8")
-
     raw_phase_log = run_dir / "raw_phase_log.md"
     raw_phase_log.write_text(f"# Superloop Raw Phase Log ({run_id})\n", encoding="utf-8")
 
     events_file = run_dir / "events.jsonl"
     events_file.write_text("", encoding="utf-8")
 
-    summary_file = run_dir / "summary.md"
     request_file = run_dir / "request.md"
     sessions_dir = run_dir / "sessions"
     sessions_dir.mkdir(parents=True, exist_ok=True)
@@ -1727,10 +1964,8 @@ def create_run_paths(runs_dir: Path, run_id: str, request_text: Optional[str], s
 
     return {
         "run_dir": run_dir,
-        "run_log": run_log,
         "raw_phase_log": raw_phase_log,
         "events_file": events_file,
-        "summary_file": summary_file,
         "request_file": request_file,
         "sessions_dir": sessions_dir,
         "plan_session_file": plan_state_file,
@@ -1745,17 +1980,13 @@ def open_existing_run_paths(
     if not run_dir.exists() or not run_dir.is_dir():
         fatal(f"[!] FATAL: run_id not found under task runs/: {run_id}")
 
-    run_log = run_dir / "run_log.md"
     raw_phase_log = run_dir / "raw_phase_log.md"
     events_file = run_dir / "events.jsonl"
-    summary_file = run_dir / "summary.md"
     request_file = run_dir / "request.md"
     sessions_dir = run_dir / "sessions"
     phases_sessions_dir = sessions_dir / "phases"
     plan_state_file = plan_session_file(run_dir)
 
-    if not run_log.exists():
-        run_log.write_text(f"# Superloop Run Log ({run_id})\n", encoding="utf-8")
     if not raw_phase_log.exists():
         raw_phase_log.write_text(f"# Superloop Raw Phase Log ({run_id})\n", encoding="utf-8")
     if not events_file.exists():
@@ -1765,10 +1996,8 @@ def open_existing_run_paths(
 
     return {
         "run_dir": run_dir,
-        "run_log": run_log,
         "raw_phase_log": raw_phase_log,
         "events_file": events_file,
-        "summary_file": summary_file,
         "request_file": request_file,
         "sessions_dir": sessions_dir,
         "plan_session_file": plan_state_file,
@@ -1953,9 +2182,11 @@ def build_fresh_phase_bootstrap(
 def build_phase_prompt(
     *,
     cwd: Path,
-    prompt_file: Path,
+    template_provenance: str,
+    rendered_template_text: str,
     request_file: Path,
     run_raw_phase_log: Path,
+    decisions_file: Path,
     pair_name: str,
     phase_name: str,
     cycle_num: int,
@@ -1972,7 +2203,7 @@ def build_phase_prompt(
     prior_phase_ids: Sequence[str] = (),
     prior_phase_keys: Sequence[str] = (),
 ) -> str:
-    base_instructions = prompt_file.read_text(encoding="utf-8")
+    base_instructions = rendered_template_text
     request_text = request_file.read_text(encoding="utf-8").strip()
     preamble = [
         f"REPOSITORY ROOT: {cwd}",
@@ -1983,6 +2214,7 @@ def build_phase_prompt(
         f"ATTEMPT: {attempt_num}",
         f"IMMUTABLE REQUEST FILE: {request_file}",
         f"AUTHORITATIVE RAW LOG: {run_raw_phase_log}",
+        f"AUTHORITATIVE SHARED DECISIONS FILE: {decisions_file}",
         "AUTHORITY ORDER FOR THIS TURN:",
         "1. Explicit clarification entries already appended to the authoritative raw log.",
         "2. The immutable initial request snapshot.",
@@ -2069,7 +2301,8 @@ def build_phase_prompt(
 def run_codex_phase(
     codex_command: CodexCommandConfig,
     cwd: Path,
-    prompt_file: Path,
+    template_provenance: str,
+    rendered_template_text: str,
     phase_name: str,
     pair_name: str,
     cycle_num: int,
@@ -2082,6 +2315,7 @@ def run_codex_phase(
     raw_phase_log: Path,
     events_file: Path,
     task_dir: Path,
+    decisions_file: Path,
     active_phase_selection: Optional[ResolvedPhaseSelection] = None,
     prior_phase_ids: Sequence[str] = (),
     prior_phase_keys: Sequence[str] = (),
@@ -2091,9 +2325,11 @@ def run_codex_phase(
     include_request_snapshot = session_state.thread_id is None
     prompt_payload = build_phase_prompt(
         cwd=cwd,
-        prompt_file=prompt_file,
+        template_provenance=template_provenance,
+        rendered_template_text=rendered_template_text,
         request_file=request_file,
         run_raw_phase_log=run_raw_phase_log,
+        decisions_file=decisions_file,
         pair_name=pair_name,
         phase_name=phase_name,
         cycle_num=cycle_num,
@@ -2141,7 +2377,7 @@ def run_codex_phase(
         raw_phase_log,
         run_id,
         "session_turn",
-        f"mode={command_mode}\nprompt_file={prompt_file}",
+        f"mode={command_mode}\ntemplate={template_provenance}",
         pair=pair_name,
         phase=phase_name,
         cycle=cycle_num,
@@ -2152,7 +2388,7 @@ def run_codex_phase(
         run_raw_phase_log,
         run_id,
         "session_turn",
-        f"mode={command_mode}\nprompt_file={prompt_file}",
+        f"mode={command_mode}\ntemplate={template_provenance}",
         pair=pair_name,
         phase=phase_name,
         cycle=cycle_num,
@@ -2226,11 +2462,6 @@ class PhaseControlDecision:
 def format_question(control: LoopControl) -> Optional[str]:
     if not control.question:
         return None
-    if control.question.best_supposition:
-        return (
-            f"{control.question.text}\n"
-            f"Best supposition: {control.question.best_supposition}"
-        )
     return control.question.text
 
 
@@ -2320,8 +2551,10 @@ def auto_answer_question(codex_command: CodexCommandConfig, root: Path, request_
 def append_clarification(
     run_raw_phase_log: Path,
     task_raw_phase_log: Path,
+    decisions_path: Path,
     session_file: Path,
     pair: str,
+    phase_id: str,
     phase: str,
     cycle: int,
     attempt: int,
@@ -2329,6 +2562,7 @@ def append_clarification(
     answer: str,
     run_id: str,
     source: str,
+    turn_seq: Optional[int] = None,
 ) -> str:
     note = f"Question:\n{question}\n\nAnswer:\n{answer}"
     body = f"{note}\n"
@@ -2354,108 +2588,30 @@ def append_clarification(
         attempt=attempt,
         source=source,
     )
+    turn_seq, qa_seq = append_decisions_runtime_block(
+        decisions_path,
+        pair=pair,
+        phase_id=phase_id,
+        run_id=run_id,
+        entry="questions",
+        body=question,
+        turn_seq=turn_seq,
+    )
+    append_decisions_runtime_block(
+        decisions_path,
+        pair=pair,
+        phase_id=phase_id,
+        run_id=run_id,
+        entry="answers",
+        body=answer,
+        turn_seq=turn_seq,
+        qa_seq=qa_seq,
+        source=source,
+    )
     session_state = load_session_state(session_file, "persistent")
     session_state.pending_clarification_note = note
     save_session_state(session_file, session_state)
     return note
-
-
-def append_run_log(
-    run_log: Path,
-    message: str,
-    run_id: str,
-    pair: Optional[str] = None,
-    cycle: Optional[int] = None,
-    attempt: Optional[int] = None,
-):
-    scope_bits = [f"run_id={run_id}"]
-    if pair is not None:
-        scope_bits.append(f"pair={pair}")
-    if cycle is not None:
-        scope_bits.append(f"cycle={cycle}")
-    if attempt is not None:
-        scope_bits.append(f"attempt={attempt}")
-    scope = " | ".join(scope_bits)
-    with run_log.open("a", encoding="utf-8") as f:
-        f.write(f"\n- {message} ({scope})\n")
-
-
-def write_run_summary(summary_file: Path, run_id: str, events_file: Path):
-    if not events_file.exists():
-        summary_file.write_text(f"# Superloop Run Summary ({run_id})\n\nNo events recorded.\n", encoding="utf-8")
-        return
-
-    counters = {
-        "phase_output_empty": 0,
-        "missing_promise_default": 0,
-        "question": 0,
-        "blocked": 0,
-        "pair_completed": 0,
-        "pair_failed": 0,
-        "phase_scope_resolved": 0,
-        "phase_started": 0,
-        "phase_completed": 0,
-        "phase_blocked": 0,
-        "phase_deferred": 0,
-    }
-
-    invariant_violations: List[str] = []
-    completed_pair_scopes: Set[Tuple[str, Optional[str]]] = set()
-
-    with events_file.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            event = json.loads(line)
-            event_type = event.get("event_type")
-            if event_type in counters:
-                counters[event_type] += 1
-
-            pair = event.get("pair")
-            phase_id = event.get("phase_id") if isinstance(event.get("phase_id"), str) else None
-            completion_scope = (pair, phase_id) if pair else None
-            allowed_after_pair_completion = {
-                "pair_completed",
-                "run_finished",
-                "phase_deferred",
-                "phase_completed",
-                "phase_blocked",
-            }
-            if (
-                completion_scope
-                and completion_scope in completed_pair_scopes
-                and event_type not in allowed_after_pair_completion
-            ):
-                invariant_violations.append(
-                    f"Pair {pair} received event {event_type} after pair_completed for phase "
-                    f"{phase_id or '[global]'} (seq={event.get('seq')})."
-                )
-
-            if event_type == "pair_completed" and pair:
-                completed_pair_scopes.add((pair, phase_id))
-
-    summary = (
-        f"# Superloop Run Summary ({run_id})\n\n"
-        f"- phase_output_empty: {counters['phase_output_empty']}\n"
-        f"- missing_promise_default: {counters['missing_promise_default']}\n"
-        f"- question events: {counters['question']}\n"
-        f"- blocked events: {counters['blocked']}\n"
-        f"- pair_completed events: {counters['pair_completed']}\n"
-        f"- pair_failed events: {counters['pair_failed']}\n"
-        f"- phase_scope_resolved events: {counters['phase_scope_resolved']}\n"
-        f"- phase_started events: {counters['phase_started']}\n"
-        f"- phase_completed events: {counters['phase_completed']}\n"
-        f"- phase_blocked events: {counters['phase_blocked']}\n"
-        f"- phase_deferred events: {counters['phase_deferred']}\n"
-    )
-    if invariant_violations:
-        summary += "\n## Invariant violations\n"
-        for violation in invariant_violations:
-            summary += f"- {violation}\n"
-    summary_file.write_text(summary, encoding="utf-8")
-
-
 def list_tasks(tasks_dir: Path) -> List[str]:
     if not tasks_dir.exists():
         return []
@@ -2755,8 +2911,6 @@ def execute_pair_cycles(
     *,
     pair_cfg: PairConfig,
     pair: str,
-    prompt_file: Path,
-    verifier_prompt_file: Path,
     artifact_bundle: ArtifactBundle,
     session_file: Path,
     root: Path,
@@ -2776,8 +2930,8 @@ def execute_pair_cycles(
     prior_phase_keys: Sequence[str] = (),
 ) -> Tuple[str, int]:
     print(f"\n===== Pair: {PAIR_LABELS[pair]} =====")
-    append_run_log(paths["run_log"], f"Started pair `{pair}`", run_id=run_id, pair=pair)
-    append_run_log(run_paths["run_log"], f"Started pair `{pair}`", run_id=run_id, pair=pair)
+    producer_template_provenance, producer_template_text = rendered_pair_template(pair, "producer", task_root_rel)
+    verifier_template_provenance, verifier_template_text = rendered_pair_template(pair, "verifier", task_root_rel)
     recorder.emit(
         "pair_started",
         pair=pair,
@@ -2787,6 +2941,7 @@ def execute_pair_cycles(
     cycle = 0
     attempt_counts: Dict[int, int] = {}
     active_phase_id = artifact_bundle.phase_id if artifact_bundle.scope == "phase-local" else None
+    ledger_phase_id = decisions_phase_id(pair, artifact_bundle)
     if use_resume_state and resume_checkpoint is not None:
         if active_phase_id is None:
             cycle = resume_checkpoint.cycle_by_pair.get(pair, 0)
@@ -2817,28 +2972,55 @@ def execute_pair_cycles(
         if use_git:
             commit_tracked_changes(root, f"superloop: pre-cycle snapshot ({pair} #{cycle_num})", pair_tracked)
 
+        producer_turn_seq = next_decisions_turn_seq(
+            paths["decisions_file"],
+            run_id=run_id,
+            pair=pair,
+            phase_id=ledger_phase_id,
+        )
+        append_decisions_header(
+            paths["decisions_file"],
+            owner=decisions_owner(pair),
+            pair=pair,
+            phase_id=ledger_phase_id,
+            turn_seq=producer_turn_seq,
+            run_id=run_id,
+        )
         producer_baseline = phase_snapshot_ref(root) if use_git else None
 
-        producer_stdout = run_codex_phase(
-            codex_command,
-            root,
-            prompt_file,
-            "producer",
-            pair,
-            cycle_num,
-            attempt_num,
-            run_id,
-            run_paths["request_file"],
-            session_file,
-            artifact_bundle,
-            run_paths["raw_phase_log"],
-            paths["raw_phase_log"],
-            run_paths["events_file"],
-            paths["task_dir"],
-            active_phase_selection=active_phase_selection if pair in PHASED_PAIRS else None,
-            prior_phase_ids=prior_phase_ids,
-            prior_phase_keys=prior_phase_keys,
-        )
+        try:
+            producer_stdout = run_codex_phase(
+                codex_command,
+                root,
+                producer_template_provenance,
+                producer_template_text,
+                "producer",
+                pair,
+                cycle_num,
+                attempt_num,
+                run_id,
+                run_paths["request_file"],
+                session_file,
+                artifact_bundle,
+                run_paths["raw_phase_log"],
+                paths["raw_phase_log"],
+                run_paths["events_file"],
+                paths["task_dir"],
+                paths["decisions_file"],
+                active_phase_selection=active_phase_selection if pair in PHASED_PAIRS else None,
+                prior_phase_ids=prior_phase_ids,
+                prior_phase_keys=prior_phase_keys,
+            )
+        except BaseException:
+            remove_trailing_empty_decisions_block(
+                paths["decisions_file"],
+                owner=decisions_owner(pair),
+                pair=pair,
+                phase_id=ledger_phase_id,
+                turn_seq=producer_turn_seq,
+                run_id=run_id,
+            )
+            raise
         recorder.emit(
             "phase_finished",
             pair=pair,
@@ -2858,6 +3040,14 @@ def execute_pair_cycles(
             if use_git
             else set()
         )
+        remove_trailing_empty_decisions_block(
+            paths["decisions_file"],
+            owner=decisions_owner(pair),
+            pair=pair,
+            phase_id=ledger_phase_id,
+            turn_seq=producer_turn_seq,
+            run_id=run_id,
+        )
 
         if producer_decision.action == "question":
             recorder.emit("question", pair=pair, phase="producer", cycle=cycle_num, attempt=attempt_num)
@@ -2872,8 +3062,10 @@ def execute_pair_cycles(
             append_clarification(
                 run_paths["raw_phase_log"],
                 paths["raw_phase_log"],
+                paths["decisions_file"],
                 session_file,
                 pair,
+                ledger_phase_id,
                 "producer",
                 cycle_num,
                 attempt_num,
@@ -2881,6 +3073,7 @@ def execute_pair_cycles(
                 answer,
                 run_id,
                 answer_source,
+                turn_seq=producer_turn_seq,
             )
             if use_git:
                 commit_tracked_changes(root, f"superloop: answered producer question ({pair} #{cycle_num})", pair_tracked)
@@ -2904,7 +3097,8 @@ def execute_pair_cycles(
         verifier_stdout = run_codex_phase(
             codex_command,
             root,
-            verifier_prompt_file,
+            verifier_template_provenance,
+            verifier_template_text,
             "verifier",
             pair,
             cycle_num,
@@ -2917,6 +3111,7 @@ def execute_pair_cycles(
             paths["raw_phase_log"],
             run_paths["events_file"],
             paths["task_dir"],
+            paths["decisions_file"],
             active_phase_selection=active_phase_selection if pair in PHASED_PAIRS else None,
             prior_phase_ids=prior_phase_ids,
             prior_phase_keys=prior_phase_keys,
@@ -2957,8 +3152,10 @@ def execute_pair_cycles(
             append_clarification(
                 run_paths["raw_phase_log"],
                 paths["raw_phase_log"],
+                paths["decisions_file"],
                 session_file,
                 pair,
+                ledger_phase_id,
                 "verifier",
                 cycle_num,
                 attempt_num,
@@ -2995,8 +3192,6 @@ def execute_pair_cycles(
 
         if verifier_decision.action == "complete":
             print(f"[SUCCESS] Pair `{pair}` completed.")
-            append_run_log(paths["run_log"], f"Completed pair `{pair}` in {cycle_num} cycles", run_id=run_id, pair=pair, cycle=cycle_num, attempt=attempt_num)
-            append_run_log(run_paths["run_log"], f"Completed pair `{pair}` in {cycle_num} cycles", run_id=run_id, pair=pair, cycle=cycle_num, attempt=attempt_num)
             recorder.emit(
                 "pair_completed",
                 pair=pair,
@@ -3009,8 +3204,6 @@ def execute_pair_cycles(
             return "complete", 0
 
         if verifier_decision.action == "blocked":
-            append_run_log(paths["run_log"], f"Blocked in pair `{pair}` cycle {cycle_num}", run_id=run_id, pair=pair, cycle=cycle_num, attempt=attempt_num)
-            append_run_log(run_paths["run_log"], f"Blocked in pair `{pair}` cycle {cycle_num}", run_id=run_id, pair=pair, cycle=cycle_num, attempt=attempt_num)
             recorder.emit("blocked", pair=pair, cycle=cycle_num, attempt=attempt_num)
             if use_git:
                 commit_paths(root, f"superloop: blocked ({pair} #{cycle_num})", set(pair_tracked) | verifier_delta)
@@ -3024,11 +3217,9 @@ def execute_pair_cycles(
         cycle += 1
         time.sleep(2)
 
-    append_run_log(paths["run_log"], f"Failed pair `{pair}` after max cycles", run_id=run_id, pair=pair)
-    append_run_log(run_paths["run_log"], f"Failed pair `{pair}` after max cycles", run_id=run_id, pair=pair)
     recorder.emit("pair_failed", pair=pair)
     if use_git:
-        commit_paths(root, f"superloop: failed ({pair} max iterations)", [repo_relative_path(root, paths["run_log"])])
+        commit_paths(root, f"superloop: failed ({pair} max iterations)", pair_tracked)
     print(f"[FAILED] Pair `{pair}` reached max iterations without COMPLETE.", file=sys.stderr)
     return "failed", 1
 
@@ -3159,8 +3350,6 @@ def main() -> int:
             )
             warn(request_notice)
             append_runtime_notice(
-                paths["run_log"],
-                run_paths["run_log"],
                 paths["raw_phase_log"],
                 run_paths["raw_phase_log"],
                 run_id,
@@ -3184,8 +3373,6 @@ def main() -> int:
             session_notice = "No stored Codex thread id is available; resuming with a new conversation for the next phase."
             warn(session_notice)
             append_runtime_notice(
-                paths["run_log"],
-                run_paths["run_log"],
                 paths["raw_phase_log"],
                 run_paths["raw_phase_log"],
                 run_id,
@@ -3209,8 +3396,6 @@ def main() -> int:
     print(f"[*] Task root: {task_root_rel}")
     print(f"[*] Enabled pairs: {', '.join(enabled_pairs)}")
     print(f"[*] Run ID: {run_id}")
-    append_run_log(paths["run_log"], "Run resumed" if args.resume else "Run started", run_id=run_id)
-    append_run_log(run_paths["run_log"], "Run resumed" if args.resume else "Run started", run_id=run_id)
     recorder.emit(
         "run_resumed" if args.resume else "run_started",
         workspace=str(root),
@@ -3285,8 +3470,6 @@ def main() -> int:
             plan_result, plan_exit = execute_pair_cycles(
                 pair_cfg=plan_cfg,
                 pair="plan",
-                prompt_file=paths["pair_plan"] / "prompt.md",
-                verifier_prompt_file=paths["pair_plan"] / "verifier_prompt.md",
                 artifact_bundle=plan_bundle,
                 session_file=run_paths["plan_session_file"],
                 root=root,
@@ -3401,8 +3584,6 @@ def main() -> int:
                     result, result_exit = execute_pair_cycles(
                         pair_cfg=pair_cfg,
                         pair=pair,
-                        prompt_file=paths[f"pair_{pair}"] / "prompt.md",
-                        verifier_prompt_file=paths[f"pair_{pair}"] / "verifier_prompt.md",
                         artifact_bundle=ensure_phase_artifacts(
                             resolve_artifact_bundle(
                                 root=root,
@@ -3492,8 +3673,6 @@ def main() -> int:
                     active_phase_selection.phase_ids[phase_index + 1] if phase_index + 1 < len(active_phase_selection.phase_ids) else None,
                 )
 
-        append_run_log(paths["run_log"], "All enabled pairs completed", run_id=run_id)
-        append_run_log(run_paths["run_log"], "All enabled pairs completed", run_id=run_id)
         if use_git:
             commit_tracked_changes(root, "superloop: successful completion", task_scoped_paths)
         print("\n[SUCCESS] All enabled pairs completed.")
@@ -3517,7 +3696,6 @@ def main() -> int:
     finally:
         if recorder is not None and run_paths is not None and run_id is not None and run_status != "setup":
             recorder.emit("run_finished", status=run_status, exit_code=exit_code)
-            write_run_summary(run_paths["summary_file"], run_id, run_paths["events_file"])
             if use_git:
                 try_commit_tracked_changes(
                     root,

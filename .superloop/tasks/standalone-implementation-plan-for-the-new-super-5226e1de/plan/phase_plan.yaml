@@ -1,0 +1,108 @@
+version: 1
+task_id: standalone-implementation-plan-for-the-new-super-5226e1de
+request_snapshot_ref: /workspace/superloop/.superloop/tasks/standalone-implementation-plan-for-the-new-super-5226e1de/runs/run-20260322T190942Z-e46bf0c0/request.md
+phases:
+  - phase_id: template-and-artifact-contract-alignment
+    title: Align templates and scaffolded artifact layout
+    objective: Replace the locked prompt templates verbatim and update workspace/run scaffolding plus artifact constants to match the final filesystem contract.
+    status: planned
+    in_scope:
+      - Replace all six prompt templates in templates/ with the appendix contents verbatim.
+      - Remove review_findings.md and test_gaps.md from artifact constants and scaffold generation.
+      - Add task-root decisions.txt scaffolding and stop creating task/run run_log.md, run summary.md, and task-local prompt copies.
+    out_of_scope:
+      - Decisions header parsing and turn-sequencing behavior.
+      - Verifier scope logic refactors.
+    dependencies: []
+    acceptance_criteria:
+      - id: AC-1
+        text: New task and run scaffolding creates only the final required artifacts and no copied prompt files.
+      - id: AC-2
+        text: The six shared prompt templates exactly match the appendix text and criteria templates remain unchanged.
+    deliverables:
+      - Updated templates directory prompt files.
+      - Updated scaffold/artifact constant logic in superloop.py.
+      - Updated tests for artifact layout expectations.
+    risks:
+      - Existing tests and runtime paths still assume prompt.md, verifier_prompt.md, run_log.md, or summary.md exist.
+    rollback:
+      - Restore prior template files and scaffold constants if artifact creation regressions block execution.
+  - phase_id: shared-prompt-loading-and-artifact-ownership-split
+    title: Load prompts from shared templates and split artifact ownership rules
+    objective: Source prompt text directly from shared templates in memory and separate tracked Superloop artifacts from verifier-exempt runtime bookkeeping.
+    status: planned
+    in_scope:
+      - Refactor build_phase_prompt(...) and run_codex_phase(...) to consume rendered template text or template provenance without task-local prompt files.
+      - Add the authoritative decisions.txt path to all prompt preambles.
+      - Split tracked artifact helpers from verifier-exempt runtime artifact helpers so decisions.txt is tracked but not verifier-exempt.
+    out_of_scope:
+      - Runtime decisions block append behavior.
+      - Clarification question and answer persistence in decisions.txt.
+    dependencies:
+      - template-and-artifact-contract-alignment
+    acceptance_criteria:
+      - id: AC-1
+        text: No run_codex_phase(...) call site depends on task-local prompt.md or verifier_prompt.md files.
+      - id: AC-2
+        text: Verifier scope enforcement still flags edits to decisions.txt while runtime bookkeeping artifacts remain exempt.
+    deliverables:
+      - Refactored prompt-building/orchestration code in superloop.py.
+      - Updated artifact helper functions and related tests.
+      - Raw-log prompt provenance updated to shared template provenance.
+    risks:
+      - Path rendering could regress if prompt templates are not rendered against task_root_rel before execution.
+      - Over-broad verifier exemptions could hide invalid edits.
+    rollback:
+      - Revert prompt-loading and artifact-helper changes together if prompts or verifier scope checks break.
+  - phase_id: decisions-ledger-runtime-integration
+    title: Integrate runtime-managed decisions ledger behavior
+    objective: Add deterministic decisions header parsing and append flows for producer turns and clarification question/answer history.
+    status: planned
+    in_scope:
+      - Add decisions.txt header parsing, sequence allocation, append helpers, and empty trailing producer-block cleanup.
+      - Pre-create producer headers for planner, implementer, and test author turns.
+      - Append runtime questions and answers blocks from append_clarification(...) and preserve prompt-defined question bodies.
+    out_of_scope:
+      - Additional compaction, migration, or manifest systems for decisions history.
+      - Any verifier write path to decisions.txt.
+    dependencies:
+      - shared-prompt-loading-and-artifact-ownership-split
+    acceptance_criteria:
+      - id: AC-1
+        text: Only planner, implementer, and test-author turns receive runtime-created producer headers; verifier turns never receive producer headers because decisions.txt remains verifier read-only.
+      - id: AC-2
+        text: For producer question turns, runtime removes any empty trailing producer block before appending the runtime questions block and later appends the matching answers block, preserving the required append-only ordering and qa_seq linkage without changing raw-log authority.
+    deliverables:
+      - Decisions helper functions and orchestration integration in superloop.py.
+      - Tests for header parsing, sequencing, clarification appends, and empty-block cleanup.
+    risks:
+      - Incorrect sequence allocation or block trimming could corrupt append-only history semantics.
+      - Question formatting changes could duplicate or distort best-supposition lines.
+    rollback:
+      - Revert decisions-helper integration as one unit if append ordering or sequence semantics prove unstable.
+  - phase_id: orchestration-cleanup-and-regression-coverage
+    title: Remove obsolete run-log flow and finish regression coverage
+    objective: Eliminate remaining run_log/summary dependencies, update runtime notice and commit paths, and close the refactor with focused regression tests.
+    status: planned
+    in_scope:
+      - Delete append_run_log(...) and write_run_summary(...) plus every call site.
+      - Simplify append_runtime_notice(...) to raw-log-only writes and update failure/completion staging paths.
+      - Refresh observability and phase-local tests to assert the new flow end to end.
+    out_of_scope:
+      - New non-requested observability channels beyond raw logs and events.jsonl.
+      - Backward-compatibility migration tooling for older task layouts.
+    dependencies:
+      - decisions-ledger-runtime-integration
+    acceptance_criteria:
+      - id: AC-1
+        text: No code path depends on task/run run_log.md or run summary.md.
+      - id: AC-2
+        text: Focused regression tests cover scaffold layout, prompt sourcing, decisions behavior, clarification flow, and verifier scope enforcement.
+    deliverables:
+      - Final orchestration cleanup in superloop.py.
+      - Updated tests/test_superloop_observability.py and tests/test_phase_local_behavior.py coverage.
+      - Removal of obsolete helper functions and artifact references.
+    risks:
+      - Resume and recovery notice paths currently write to removed run logs and must be fully redirected.
+    rollback:
+      - Restore the removed helpers temporarily only if raw-log-only notice flow proves insufficient during verification.
