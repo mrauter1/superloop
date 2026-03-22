@@ -357,7 +357,15 @@ def ensure_phase_plan_scaffold(task_dir: Path, task_id: str, request_file: Path)
     scaffold = authoritative_phase_plan_metadata(task_id, request_file)
     scaffold["phases"] = [] if phases is None else phases
     plan_path.parent.mkdir(parents=True, exist_ok=True)
-    plan_path.write_text(json.dumps(scaffold, indent=2) + "\n", encoding="utf-8")
+    dump_fn = getattr(yaml, "safe_dump", None)
+    if callable(dump_fn):
+        serialized = dump_fn(scaffold, sort_keys=False, allow_unicode=True)
+    else:
+        serialized = json.dumps(scaffold, indent=2) + "\n"
+    plan_path.write_text(
+        serialized,
+        encoding="utf-8",
+    )
     return plan_path
 
 
