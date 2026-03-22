@@ -250,7 +250,7 @@ def test_prompt_bootstrap_only_for_fresh_phase_thread(tmp_path: Path):
     assert "session.json" not in resumed
 
 
-def test_fresh_phase_bootstrap_fails_when_size_cap_is_exceeded(tmp_path: Path, monkeypatch):
+def test_fresh_phase_bootstrap_does_not_enforce_size_cap(tmp_path: Path):
     prompt_file = tmp_path / "prompt.md"
     prompt_file.write_text("Prompt\n", encoding="utf-8")
     request_file = tmp_path / "request.md"
@@ -272,30 +272,28 @@ def test_fresh_phase_bootstrap_fails_when_size_cap_is_exceeded(tmp_path: Path, m
         phase_dir_key="phase-b",
         phase_title="Phase B",
     )
-    monkeypatch.setattr("superloop.MAX_FRESH_PHASE_BOOTSTRAP_BYTES", 64)
-
-    with pytest.raises(ValueError, match="Fresh phase bootstrap exceeds 64 UTF-8 bytes"):
-        build_phase_prompt(
-            cwd=tmp_path,
-            prompt_file=prompt_file,
-            request_file=request_file,
-            run_raw_phase_log=run_raw,
-            pair_name="implement",
-            phase_name="producer",
-            cycle_num=1,
-            attempt_num=1,
-            run_id="run",
-            session_state=type("S", (), {"thread_id": None, "pending_clarification_note": None})(),
-            include_request_snapshot=True,
-            artifact_bundle=bundle,
-            session_file=tmp_path / "sess.json",
-            is_fresh_phase_thread=True,
-            events_file=events,
-            task_dir=task_dir,
-            active_phase_selection=_selection("phase-b"),
-            prior_phase_ids=("phase-a",),
-            prior_phase_keys=("phase-a",),
-        )
+    fresh = build_phase_prompt(
+        cwd=tmp_path,
+        prompt_file=prompt_file,
+        request_file=request_file,
+        run_raw_phase_log=run_raw,
+        pair_name="implement",
+        phase_name="producer",
+        cycle_num=1,
+        attempt_num=1,
+        run_id="run",
+        session_state=type("S", (), {"thread_id": None, "pending_clarification_note": None})(),
+        include_request_snapshot=True,
+        artifact_bundle=bundle,
+        session_file=tmp_path / "sess.json",
+        is_fresh_phase_thread=True,
+        events_file=events,
+        task_dir=task_dir,
+        active_phase_selection=_selection("phase-b"),
+        prior_phase_ids=("phase-a",),
+        prior_phase_keys=("phase-a",),
+    )
+    assert "INITIAL REQUEST SNAPSHOT:" in fresh
 
 
 def test_verifier_scope_phase_local_allows_active_phase_only():
