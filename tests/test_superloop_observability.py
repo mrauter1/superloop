@@ -5,6 +5,7 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
 import superloop
 
 from superloop import (
@@ -15,7 +16,6 @@ from superloop import (
     RuntimeConfig,
     append_clarification,
     append_raw_phase_log,
-    append_run_log,
     build_phase_prompt,
     create_run_paths,
     discover_config_file,
@@ -39,7 +39,6 @@ from superloop import (
     SessionState,
     task_request_text,
     task_id_for_run,
-    write_run_summary,
     verifier_scope_violations,
 )
 
@@ -394,14 +393,38 @@ def test_create_run_paths_creates_per_run_artifacts(tmp_path: Path):
 
     assert "session_file" not in run_paths
     assert run_paths["run_dir"].is_dir()
-    assert run_paths["run_log"].exists()
     assert run_paths["raw_phase_log"].exists()
     assert run_paths["events_file"].exists()
-    assert run_paths["summary_file"].parent == run_paths["run_dir"]
+    assert not (run_paths["run_dir"] / "run_log.md").exists()
+    assert not (run_paths["run_dir"] / "summary.md").exists()
     assert run_paths["request_file"].read_text(encoding="utf-8").strip() == "Implement feature X"
     session_payload = json.loads(run_paths["plan_session_file"].read_text(encoding="utf-8"))
     assert session_payload["mode"] == "persistent"
     assert session_payload["thread_id"] is None
+
+
+def test_append_runtime_notice_writes_only_task_and_run_raw_logs(tmp_path: Path):
+    task_raw_phase_log = tmp_path / "task_raw_phase_log.md"
+    run_raw_phase_log = tmp_path / "run_raw_phase_log.md"
+    task_raw_phase_log.write_text("# task raw\n", encoding="utf-8")
+    run_raw_phase_log.write_text("# run raw\n", encoding="utf-8")
+
+    superloop.append_runtime_notice(
+        task_raw_phase_log,
+        run_raw_phase_log,
+        "run-123",
+        "Recovered missing request snapshot",
+        entry="request_recovery",
+    )
+
+    task_text = task_raw_phase_log.read_text(encoding="utf-8")
+    run_text = run_raw_phase_log.read_text(encoding="utf-8")
+
+    assert "Recovered missing request snapshot" in task_text
+    assert "Recovered missing request snapshot" in run_text
+    assert "request_recovery" in task_text
+    assert "request_recovery" in run_text
+    assert not (tmp_path / "run_log.md").exists()
 
 
 def test_ensure_phase_plan_scaffold_writes_runtime_metadata_after_request_snapshot_exists(tmp_path: Path, monkeypatch):
@@ -457,7 +480,7 @@ def test_raw_phase_log_includes_run_cycle_attempt(tmp_path: Path):
     assert "attempt=3" in text
 
 
-def test_event_recorder_and_summary_counts(tmp_path: Path):
+def test_event_recorder_writes_sequenced_events(tmp_path: Path):
     run_paths = create_run_paths(tmp_path, "run-abc", "Implement feature X")
     recorder = EventRecorder(run_id="run-abc", events_file=run_paths["events_file"])
 
@@ -472,28 +495,6 @@ def test_event_recorder_and_summary_counts(tmp_path: Path):
 
     events = [json.loads(line) for line in run_paths["events_file"].read_text(encoding="utf-8").splitlines() if line]
     assert [e["seq"] for e in events] == [1, 2, 3, 4, 5, 6, 7, 8]
-
-    write_run_summary(run_paths["summary_file"], "run-abc", run_paths["events_file"])
-    summary = run_paths["summary_file"].read_text(encoding="utf-8")
-    assert "phase_output_empty: 1" in summary
-    assert "missing_promise_default: 1" in summary
-    assert "pair_completed events: 1" in summary
-    assert "phase_scope_resolved events: 1" in summary
-    assert "phase_completed events: 1" in summary
-
-
-def test_write_run_summary_allows_phase_lifecycle_events_after_pair_completed(tmp_path: Path):
-    run_paths = create_run_paths(tmp_path, "run-lifecycle", "Implement feature X")
-    recorder = EventRecorder(run_id="run-lifecycle", events_file=run_paths["events_file"])
-    recorder.emit("pair_completed", pair="implement", cycle=1, attempt=1, phase_id="phase-1")
-    recorder.emit("phase_deferred", pair="implement", phase_id="phase-1")
-    recorder.emit("pair_completed", pair="test", cycle=1, attempt=1, phase_id="phase-1")
-    recorder.emit("phase_completed", pair="test", phase_id="phase-1")
-    recorder.emit("run_finished", status="success")
-
-    write_run_summary(run_paths["summary_file"], "run-lifecycle", run_paths["events_file"])
-    summary = run_paths["summary_file"].read_text(encoding="utf-8")
-    assert "## Invariant violations" not in summary
 
 
 def test_load_resume_checkpoint_skips_completed_pairs_and_continues_cycle(tmp_path: Path):
@@ -667,20 +668,7 @@ def test_validate_phase_plan_still_requires_non_empty_required_lists():
         )
 
 
-def test_append_run_log_scopes_entries(tmp_path: Path):
-    run_log = tmp_path / "run_log.md"
-    run_log.write_text("# Run\n", encoding="utf-8")
-
-    append_run_log(run_log, "Started pair `plan`", run_id="run-1", pair="plan", cycle=1, attempt=2)
-
-    text = run_log.read_text(encoding="utf-8")
-    assert "run_id=run-1" in text
-    assert "pair=plan" in text
-    assert "cycle=1" in text
-    assert "attempt=2" in text
-
-
-def test_main_fatal_error_still_writes_terminal_event_and_summary(tmp_path: Path, monkeypatch):
+def test_main_fatal_error_still_writes_terminal_event_without_summary(tmp_path: Path, monkeypatch):
     install_fake_yaml(monkeypatch)
     monkeypatch.setattr(superloop, "check_dependencies", lambda require_git=True: None)
     monkeypatch.setattr(superloop, "resolve_codex_exec_command", lambda model: fake_codex_command())
@@ -722,9 +710,7 @@ def test_main_fatal_error_still_writes_terminal_event_and_summary(tmp_path: Path
     ]
     assert events[-1]["event_type"] == "run_finished"
     assert events[-1]["status"] == "fatal_error"
-
-    summary_text = (run_dirs[0] / "summary.md").read_text(encoding="utf-8")
-    assert "Superloop Run Summary" in summary_text
+    assert not (run_dirs[0] / "summary.md").exists()
 
 
 def test_try_commit_tracked_changes_warns_and_returns_false_on_commit_failure(tmp_path: Path, monkeypatch):
@@ -827,22 +813,25 @@ def test_latest_run_status_skips_malformed_event_lines(tmp_path: Path):
     assert latest_run_status(events) == "success"
 
 
-def test_verifier_scope_violations_ignores_superloop_artifacts():
+def test_verifier_scope_violations_only_ignores_runtime_bookkeeping_artifacts():
     task_root = ".superloop/tasks/task-1"
     delta = {
         ".superloop/tasks/task-1/runs/run-1/events.jsonl",
         ".superloop/tasks/task-1/raw_phase_log.md",
+        ".superloop/tasks/task-1/decisions.txt",
         ".superloop/tasks/task-1/implement/notes.md",
         ".superloop/tasks/task-1/test/output.md",
     }
-    assert verifier_scope_violations("implement", delta, task_root) == [".superloop/tasks/task-1/test/output.md"]
+    assert verifier_scope_violations("implement", delta, task_root) == [
+        ".superloop/tasks/task-1/decisions.txt",
+        ".superloop/tasks/task-1/test/output.md",
+    ]
 
 
 def test_verifier_scope_violations_does_not_ignore_artifact_prefixed_files():
     task_root = ".superloop/tasks/task-1"
     delta = {
         ".superloop/tasks/task-1/task.json.bak",
-        ".superloop/tasks/task-1/run_log.md.tmp",
         ".superloop/tasks/task-1/runs-backup/log.jsonl",
     }
     assert verifier_scope_violations("implement", delta, task_root) == sorted(delta)
@@ -983,7 +972,7 @@ def test_resume_accepts_long_explicit_task_id(tmp_path: Path, monkeypatch):
     assert exit_code == 0
 
 
-def test_ensure_workspace_creates_task_scoped_paths_and_task_prompts(tmp_path: Path):
+def test_ensure_workspace_creates_task_scoped_paths_without_task_local_prompts(tmp_path: Path):
     paths = ensure_workspace(
         root=tmp_path,
         task_id="my-task",
@@ -994,45 +983,17 @@ def test_ensure_workspace_creates_task_scoped_paths_and_task_prompts(tmp_path: P
     task_dir = tmp_path / ".superloop" / "tasks" / "my-task"
     assert paths["task_dir"] == task_dir
     assert (task_dir / "task.json").exists()
-    assert (task_dir / "plan" / "prompt.md").exists()
+    assert (task_dir / "decisions.txt").exists()
+    assert not (task_dir / "run_log.md").exists()
+    assert not (task_dir / "plan" / "prompt.md").exists()
+    assert not (task_dir / "plan" / "verifier_prompt.md").exists()
+    assert not (task_dir / "implement" / "prompt.md").exists()
+    assert not (task_dir / "implement" / "verifier_prompt.md").exists()
+    assert not (task_dir / "test" / "prompt.md").exists()
+    assert not (task_dir / "test" / "verifier_prompt.md").exists()
     assert not phase_plan_file(task_dir).exists()
     assert not (task_dir / "context.md").exists()
     assert task_request_text(paths["task_meta_file"], paths["legacy_context_file"]) == "Implement feature X"
-
-    plan_prompt = (task_dir / "plan" / "prompt.md").read_text(encoding="utf-8")
-    assert ".superloop/tasks/my-task/plan/plan.md" in plan_prompt
-    assert ".superloop/tasks/my-task/plan/phase_plan.yaml" in plan_prompt
-    assert ".superloop/plan/plan.md" not in plan_prompt
-    assert ".superloop/context.md" not in plan_prompt
-    assert "authoring the `phases` payload only" in plan_prompt
-    assert "Do not edit or replace `version`, `task_id`, or `request_snapshot_ref`" in plan_prompt
-
-    plan_verifier_prompt = (task_dir / "plan" / "verifier_prompt.md").read_text(encoding="utf-8")
-    assert "incorrect runtime-owned `phase_plan.yaml` metadata" in plan_verifier_prompt
-
-    implement_prompt = (task_dir / "implement" / "prompt.md").read_text(encoding="utf-8")
-    assert ".superloop/tasks/my-task/implement/phases/<phase-dir-key>/feedback.md" in implement_prompt
-    assert ".superloop/tasks/my-task/implement/phases/<phase-dir-key>/implementation_notes.md" in implement_prompt
-    assert ".superloop/tasks/my-task/implement/feedback.md" not in implement_prompt
-    assert ".superloop/tasks/my-task/implement/implementation_notes.md" not in implement_prompt
-
-    implement_verifier_prompt = (task_dir / "implement" / "verifier_prompt.md").read_text(encoding="utf-8")
-    assert ".superloop/tasks/my-task/implement/phases/<phase-dir-key>/criteria.md" in implement_verifier_prompt
-    assert ".superloop/tasks/my-task/implement/phases/<phase-dir-key>/feedback.md" in implement_verifier_prompt
-    assert ".superloop/tasks/my-task/implement/criteria.md" not in implement_verifier_prompt
-    assert ".superloop/tasks/my-task/implement/feedback.md" not in implement_verifier_prompt
-
-    test_prompt = (task_dir / "test" / "prompt.md").read_text(encoding="utf-8")
-    assert ".superloop/tasks/my-task/test/phases/<phase-dir-key>/test_strategy.md" in test_prompt
-    assert ".superloop/tasks/my-task/test/phases/<phase-dir-key>/feedback.md" in test_prompt
-    assert ".superloop/tasks/my-task/test/test_strategy.md" not in test_prompt
-    assert ".superloop/tasks/my-task/test/feedback.md" not in test_prompt
-
-    test_verifier_prompt = (task_dir / "test" / "verifier_prompt.md").read_text(encoding="utf-8")
-    assert ".superloop/tasks/my-task/test/phases/<phase-dir-key>/criteria.md" in test_verifier_prompt
-    assert ".superloop/tasks/my-task/test/phases/<phase-dir-key>/feedback.md" in test_verifier_prompt
-    assert ".superloop/tasks/my-task/test/criteria.md" not in test_verifier_prompt
-    assert ".superloop/tasks/my-task/test/feedback.md" not in test_verifier_prompt
 
 
 
@@ -1154,10 +1115,10 @@ def test_load_phase_plan_and_resolve_selection(tmp_path: Path, monkeypatch):
 
 
 def test_build_phase_prompt_includes_active_phase_contract(tmp_path: Path):
-    prompt_file = tmp_path / "prompt.md"
-    prompt_file.write_text("Prompt body\n", encoding="utf-8")
     request_file = tmp_path / "request.md"
     request_file.write_text("Implement feature X\n", encoding="utf-8")
+    decisions_file = tmp_path / "decisions.txt"
+    decisions_file.write_text("", encoding="utf-8")
     selection = superloop.ResolvedPhaseSelection(
         phase_mode="single",
         phase_ids=("phase-1",),
@@ -1181,9 +1142,11 @@ def test_build_phase_prompt_includes_active_phase_contract(tmp_path: Path):
 
     prompt = build_phase_prompt(
         cwd=tmp_path,
-        prompt_file=prompt_file,
+        template_provenance="templates/implement_producer.md",
+        rendered_template_text="Prompt body\n",
         request_file=request_file,
         run_raw_phase_log=tmp_path / "raw_phase_log.md",
+        decisions_file=decisions_file,
         pair_name="implement",
         phase_name="producer",
         cycle_num=1,
@@ -1203,6 +1166,7 @@ def test_build_phase_prompt_includes_active_phase_contract(tmp_path: Path):
     assert "ACTIVE PHASE EXECUTION CONTRACT:" in prompt
     assert "phase_ids: phase-1" in prompt
     assert "Phase phase-1: Phase 1" in prompt
+    assert f"AUTHORITATIVE SHARED DECISIONS FILE: {decisions_file}" in prompt
     assert "AUTHORITATIVE ACTIVE SESSION FILE: " in prompt
     assert "sessions/phases/phase-1.json" in prompt
     assert "session.json" not in prompt
@@ -1211,17 +1175,19 @@ def test_build_phase_prompt_includes_active_phase_contract(tmp_path: Path):
 def test_build_phase_prompt_requires_explicit_session_file(tmp_path: Path):
     import pytest
 
-    prompt_file = tmp_path / "prompt.md"
-    prompt_file.write_text("Prompt body\n", encoding="utf-8")
     request_file = tmp_path / "request.md"
     request_file.write_text("Implement feature X\n", encoding="utf-8")
+    decisions_file = tmp_path / "decisions.txt"
+    decisions_file.write_text("", encoding="utf-8")
 
     with pytest.raises(TypeError):
         build_phase_prompt(
             cwd=tmp_path,
-            prompt_file=prompt_file,
+            template_provenance="templates/plan_producer.md",
+            rendered_template_text="Prompt body\n",
             request_file=request_file,
             run_raw_phase_log=tmp_path / "raw_phase_log.md",
+            decisions_file=decisions_file,
             pair_name="plan",
             phase_name="producer",
             cycle_num=1,
@@ -1237,9 +1203,81 @@ def test_build_phase_prompt_requires_explicit_session_file(tmp_path: Path):
         )
 
 
+def test_run_codex_phase_logs_shared_template_provenance(tmp_path: Path, monkeypatch):
+    request_file = tmp_path / "request.md"
+    request_file.write_text("Implement feature X\n", encoding="utf-8")
+    task_raw_phase_log = tmp_path / "task_raw_phase_log.md"
+    task_raw_phase_log.write_text("# task raw\n", encoding="utf-8")
+    run_raw_phase_log = tmp_path / "run_raw_phase_log.md"
+    run_raw_phase_log.write_text("# run raw\n", encoding="utf-8")
+    decisions_file = tmp_path / "decisions.txt"
+    decisions_file.write_text("", encoding="utf-8")
+    events_file = tmp_path / "events.jsonl"
+    events_file.write_text("", encoding="utf-8")
+    session_file = tmp_path / "session.json"
+    superloop.save_session_state(
+        session_file,
+        SessionState(
+            mode="persistent",
+            thread_id=None,
+            pending_clarification_note=None,
+            created_at="2026-03-18T00:00:00Z",
+        ),
+    )
+    artifact_bundle = superloop.ArtifactBundle(
+        pair="plan",
+        scope="task-global",
+        artifact_dir=tmp_path,
+        criteria_file=tmp_path / "criteria.md",
+        feedback_file=tmp_path / "feedback.md",
+        artifact_files={},
+        allowed_verifier_prefixes=(),
+    )
+
+    raw_exec_output = "\n".join(
+        [
+            json.dumps({"type": "thread.started", "thread_id": "thread-1"}),
+            json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "agent output"}}),
+        ]
+    )
+
+    def fake_run(*args, **kwargs):
+        return subprocess.CompletedProcess(args=args[0], returncode=0, stdout=raw_exec_output)
+
+    monkeypatch.setattr(superloop.subprocess, "run", fake_run)
+
+    template_provenance = str(superloop.pair_template_path("plan", "producer"))
+    stdout = superloop.run_codex_phase(
+        fake_codex_command(),
+        tmp_path,
+        template_provenance,
+        "Prompt body\n",
+        "producer",
+        "plan",
+        1,
+        1,
+        "run-1",
+        request_file,
+        session_file,
+        artifact_bundle,
+        run_raw_phase_log,
+        task_raw_phase_log,
+        events_file,
+        tmp_path,
+        decisions_file,
+    )
+
+    assert stdout == "agent output"
+    assert f"template={template_provenance}" in task_raw_phase_log.read_text(encoding="utf-8")
+    assert f"template={template_provenance}" in run_raw_phase_log.read_text(encoding="utf-8")
+    assert "prompt.md" not in task_raw_phase_log.read_text(encoding="utf-8")
+    assert "prompt.md" not in run_raw_phase_log.read_text(encoding="utf-8")
+
+
 def test_tracked_superloop_paths_excludes_runs_directory():
     tracked = superloop.tracked_superloop_paths(".superloop/tasks/task-1", "implement")
     assert ".superloop/tasks/task-1/runs/" not in tracked
+    assert ".superloop/tasks/task-1/decisions.txt" in tracked
     assert ".superloop/tasks/task-1/implement/" in tracked
 
 
@@ -1302,7 +1340,6 @@ def test_execute_pair_cycles_excludes_run_outputs_from_snapshot_delta_commits(tm
             "src/feature.py",
         },
         "verifier": {
-            ".superloop/tasks/task-1/runs/run-1/summary.md",
             ".superloop/tasks/task-1/implement/phases/phase-1/feedback.md",
         },
     }
@@ -1331,8 +1368,6 @@ def test_execute_pair_cycles_excludes_run_outputs_from_snapshot_delta_commits(tm
     status, code = execute_pair_cycles(
         pair_cfg=PairConfig(name="implement", enabled=True, max_iterations=1),
         pair="implement",
-        prompt_file=tmp_path / "prompt.md",
-        verifier_prompt_file=tmp_path / "verifier_prompt.md",
         artifact_bundle=bundle,
         session_file=run_paths["plan_session_file"],
         root=tmp_path,
@@ -1422,7 +1457,6 @@ def test_execute_pair_cycles_excludes_run_outputs_from_blocked_commit(tmp_path: 
             "src/feature.py",
         },
         "verifier": {
-            ".superloop/tasks/task-1/runs/run-1/summary.md",
             ".superloop/tasks/task-1/implement/phases/phase-1/feedback.md",
         },
     }
@@ -1451,8 +1485,6 @@ def test_execute_pair_cycles_excludes_run_outputs_from_blocked_commit(tmp_path: 
     status, code = execute_pair_cycles(
         pair_cfg=PairConfig(name="implement", enabled=True, max_iterations=1),
         pair="implement",
-        prompt_file=tmp_path / "prompt.md",
-        verifier_prompt_file=tmp_path / "verifier_prompt.md",
         artifact_bundle=bundle,
         session_file=run_paths["plan_session_file"],
         root=tmp_path,
@@ -1501,17 +1533,130 @@ def test_ensure_workspace_preserve_mode_keeps_existing_request(tmp_path: Path):
     assert task_meta["request_text"] == "Intent A"
 
 
-def test_ensure_workspace_does_not_rewrite_existing_task_prompts(tmp_path: Path):
+def test_execute_pair_cycles_failure_commit_uses_tracked_pair_paths_only(tmp_path: Path, monkeypatch):
+    paths = ensure_workspace(tmp_path, "task-1", "Implement feature X", "replace")
+    run_paths = create_run_paths(paths["runs_dir"], "run-1", "Implement feature X")
+    recorder = EventRecorder(run_id="run-1", events_file=run_paths["events_file"])
+
+    phase_dir = paths["task_dir"] / "implement" / "phases" / "phase-1"
+    phase_dir.mkdir(parents=True, exist_ok=True)
+    criteria_file = phase_dir / "criteria.md"
+    feedback_file = phase_dir / "feedback.md"
+    criteria_file.write_text("- [x] done\n", encoding="utf-8")
+    feedback_file.write_text("# feedback\n", encoding="utf-8")
+
+    selection = superloop.ResolvedPhaseSelection(
+        phase_mode="single",
+        phase_ids=("phase-1",),
+        phases=(
+            superloop.PhasePlanPhase(
+                phase_id="phase-1",
+                title="Phase 1",
+                objective="Deliver phase 1",
+                in_scope=("code path A",),
+                out_of_scope=(),
+                dependencies=(),
+                acceptance_criteria=(superloop.PhasePlanCriterion(id="AC-1", text="done"),),
+                deliverables=("code",),
+                risks=(),
+                rollback=(),
+                status="planned",
+            ),
+        ),
+        explicit=True,
+    )
+    bundle = superloop.ArtifactBundle(
+        pair="implement",
+        scope="phase-local",
+        artifact_dir=phase_dir,
+        criteria_file=criteria_file,
+        feedback_file=feedback_file,
+        artifact_files={"criteria.md": criteria_file, "feedback.md": feedback_file},
+        allowed_verifier_prefixes=(f"{paths['task_root_rel']}/implement/phases/phase-1/",),
+        phase_id="phase-1",
+        phase_dir_key="phase-1",
+        phase_title="Phase 1",
+    )
+
+    producer_control = superloop.LoopControl(question=None, promise=None, source="canonical", raw_payload=None)
+    verifier_control = superloop.LoopControl(
+        question=None,
+        promise=superloop.PROMISE_INCOMPLETE,
+        source="canonical",
+        raw_payload=None,
+    )
+    parse_results = [producer_control, verifier_control]
+    delta_by_snapshot = {
+        "producer": {
+            ".superloop/tasks/task-1/runs/run-1/events.jsonl",
+            "src/feature.py",
+        },
+        "verifier": {
+            ".superloop/tasks/task-1/implement/phases/phase-1/feedback.md",
+        },
+    }
+    committed_paths: list[tuple[str, set[str]]] = []
+
+    monkeypatch.setattr(superloop, "commit_tracked_changes", lambda *args, **kwargs: False)
+    monkeypatch.setattr(superloop, "phase_snapshot_ref", lambda *_args, **_kwargs: "producer" if not committed_paths else "verifier")
+    monkeypatch.setattr(superloop, "run_codex_phase", lambda *args, **kwargs: "<loop-control></loop-control>")
+    monkeypatch.setattr(superloop, "parse_phase_control", lambda *args, **kwargs: parse_results.pop(0))
+    monkeypatch.setattr(
+        superloop,
+        "changed_paths_from_snapshot",
+        lambda _root, snapshot, tracked_paths=None: set(delta_by_snapshot[snapshot]),
+    )
+    monkeypatch.setattr(superloop, "criteria_all_checked", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        superloop,
+        "commit_paths",
+        lambda _root, message, paths: committed_paths.append((message, set(paths))) or True,
+    )
+    monkeypatch.setattr(superloop.time, "sleep", lambda _seconds: None)
+
+    status, code = execute_pair_cycles(
+        pair_cfg=PairConfig(name="implement", enabled=True, max_iterations=1),
+        pair="implement",
+        artifact_bundle=bundle,
+        session_file=run_paths["plan_session_file"],
+        root=tmp_path,
+        codex_command=fake_codex_command(),
+        run_id="run-1",
+        run_paths=run_paths,
+        paths=paths,
+        recorder=recorder,
+        task_root_rel=str(paths["task_root_rel"]),
+        use_git=True,
+        active_phase_selection=selection,
+        enabled_pairs=["implement"],
+        args=argparse.Namespace(full_auto_answers=False),
+        resume_checkpoint=None,
+        use_resume_state=False,
+    )
+
+    assert (status, code) == ("failed", 1)
+    assert [message for message, _paths in committed_paths] == [
+        "superloop: producer edits (implement #1)",
+        "superloop: verifier feedback (implement #1)",
+        "superloop: failed (implement max iterations)",
+    ]
+    assert committed_paths[-1][1] == set(superloop.tracked_superloop_paths(".superloop/tasks/task-1", "implement"))
+    assert all(
+        not any(
+            path.endswith("run_log.md") or path.endswith("summary.md") or path.startswith(".superloop/tasks/task-1/runs/")
+            for path in paths
+        )
+        for _message, paths in committed_paths
+    )
+
+
+def test_ensure_workspace_does_not_create_task_local_prompts_on_repeat_calls(tmp_path: Path):
     paths = ensure_workspace(
         root=tmp_path,
         task_id="same-task",
         product_intent="Intent A",
         intent_mode="replace",
     )
-    prompt_file = paths["task_dir"] / "plan" / "prompt.md"
-    verifier_prompt_file = paths["task_dir"] / "plan" / "verifier_prompt.md"
-    prompt_file.write_text("custom prompt\n", encoding="utf-8")
-    verifier_prompt_file.write_text("custom verifier prompt\n", encoding="utf-8")
 
     ensure_workspace(
         root=tmp_path,
@@ -1520,19 +1665,23 @@ def test_ensure_workspace_does_not_rewrite_existing_task_prompts(tmp_path: Path)
         intent_mode="preserve",
     )
 
-    assert prompt_file.read_text(encoding="utf-8") == "custom prompt\n"
-    assert verifier_prompt_file.read_text(encoding="utf-8") == "custom verifier prompt\n"
+    assert not (paths["task_dir"] / "plan" / "prompt.md").exists()
+    assert not (paths["task_dir"] / "plan" / "verifier_prompt.md").exists()
 
 def test_append_clarification_logs_to_raw_phase_log_and_updates_session(tmp_path: Path):
     run_paths = create_run_paths(tmp_path, "run-clarify", "Initial request")
     task_raw_log = tmp_path / "task_raw_phase_log.md"
     task_raw_log.write_text("# Task Raw\n", encoding="utf-8")
+    decisions = tmp_path / "decisions.txt"
+    decisions.write_text("", encoding="utf-8")
 
     append_clarification(
         run_paths["raw_phase_log"],
         task_raw_log,
+        decisions,
         run_paths["plan_session_file"],
         pair="plan",
+        phase_id="task-global",
         phase="producer",
         cycle=1,
         attempt=2,
@@ -1548,6 +1697,313 @@ def test_append_clarification_logs_to_raw_phase_log_and_updates_session(tmp_path
     assert "Approved answer" in run_text
     session_payload = json.loads(run_paths["plan_session_file"].read_text(encoding="utf-8"))
     assert "Approved answer" in session_payload["pending_clarification_note"]
+    decisions_text = decisions.read_text(encoding="utf-8")
+    assert 'entry="questions"' in decisions_text
+    assert 'entry="answers"' in decisions_text
+    assert 'source="human"' in decisions_text
+
+
+def test_execute_pair_cycles_removes_empty_producer_block_before_runtime_question_blocks(tmp_path: Path, monkeypatch):
+    paths = ensure_workspace(tmp_path, "task-1", "Implement feature X", "replace")
+    run_paths = create_run_paths(paths["runs_dir"], "run-1", "Implement feature X")
+    recorder = EventRecorder(run_id="run-1", events_file=run_paths["events_file"])
+
+    phase_dir = paths["task_dir"] / "implement" / "phases" / "phase-1"
+    phase_dir.mkdir(parents=True, exist_ok=True)
+    criteria_file = phase_dir / "criteria.md"
+    feedback_file = phase_dir / "feedback.md"
+    criteria_file.write_text("- [x] done\n", encoding="utf-8")
+    feedback_file.write_text("# feedback\n", encoding="utf-8")
+
+    selection = superloop.ResolvedPhaseSelection(
+        phase_mode="single",
+        phase_ids=("phase-1",),
+        phases=(
+            superloop.PhasePlanPhase(
+                phase_id="phase-1",
+                title="Phase 1",
+                objective="Deliver phase 1",
+                in_scope=("code path A",),
+                out_of_scope=(),
+                dependencies=(),
+                acceptance_criteria=(superloop.PhasePlanCriterion(id="AC-1", text="done"),),
+                deliverables=("code",),
+                risks=(),
+                rollback=(),
+                status="planned",
+            ),
+        ),
+        explicit=True,
+    )
+    bundle = superloop.ArtifactBundle(
+        pair="implement",
+        scope="phase-local",
+        artifact_dir=phase_dir,
+        criteria_file=criteria_file,
+        feedback_file=feedback_file,
+        artifact_files={"criteria.md": criteria_file, "feedback.md": feedback_file},
+        allowed_verifier_prefixes=(f"{paths['task_root_rel']}/implement/phases/phase-1/",),
+        phase_id="phase-1",
+        phase_dir_key="phase-1",
+        phase_title="Phase 1",
+    )
+
+    observed_headers: list[str] = []
+    question_stdout = (
+        '<loop-control>\n'
+        '{"schema":"docloop.loop_control/v1","kind":"question","question":"Need confirmation?\\nBest supposition: proceed safely.","best_supposition":"proceed safely"}\n'
+        '</loop-control>'
+    )
+
+    def fake_run_codex_phase(*args, **kwargs):
+        phase_name = args[4]
+        current = paths["decisions_file"].read_text(encoding="utf-8")
+        if phase_name == "producer":
+            observed_headers.append(current)
+            assert 'owner="implementer"' in current
+            return question_stdout
+        raise AssertionError("Verifier should not run after a producer clarification question.")
+
+    class StopAfterClarification(RuntimeError):
+        pass
+
+    original_append_clarification = superloop.append_clarification
+
+    def stop_after_clarification(*args, **kwargs):
+        original_append_clarification(*args, **kwargs)
+        raise StopAfterClarification
+
+    monkeypatch.setattr(superloop, "commit_tracked_changes", lambda *args, **kwargs: False)
+    monkeypatch.setattr(superloop, "run_codex_phase", fake_run_codex_phase)
+    monkeypatch.setattr(superloop, "ask_human", lambda question_text: "Approved answer")
+    monkeypatch.setattr(superloop, "append_clarification", stop_after_clarification)
+
+    with pytest.raises(StopAfterClarification):
+        execute_pair_cycles(
+            pair_cfg=PairConfig(name="implement", enabled=True, max_iterations=1),
+            pair="implement",
+            artifact_bundle=bundle,
+            session_file=run_paths["plan_session_file"],
+            root=tmp_path,
+            codex_command=fake_codex_command(),
+            run_id="run-1",
+            run_paths=run_paths,
+            paths=paths,
+            recorder=recorder,
+            task_root_rel=str(paths["task_root_rel"]),
+            use_git=False,
+            active_phase_selection=selection,
+            enabled_pairs=["implement"],
+            args=argparse.Namespace(full_auto_answers=False),
+            resume_checkpoint=None,
+            use_resume_state=False,
+        )
+
+    decisions_text = paths["decisions_file"].read_text(encoding="utf-8")
+    assert 'owner="implementer"' not in decisions_text
+    assert 'entry="questions"' in decisions_text
+    assert 'entry="answers"' in decisions_text
+    assert 'qa_seq="1"' in decisions_text
+    assert 'turn_seq="1"' in decisions_text
+    assert "Need confirmation?" in decisions_text
+    assert "Approved answer" in decisions_text
+
+
+def test_execute_pair_cycles_preserves_non_empty_producer_block_on_question_turn(tmp_path: Path, monkeypatch):
+    paths = ensure_workspace(tmp_path, "task-1", "Implement feature X", "replace")
+    run_paths = create_run_paths(paths["runs_dir"], "run-1", "Implement feature X")
+    recorder = EventRecorder(run_id="run-1", events_file=run_paths["events_file"])
+
+    phase_dir = paths["task_dir"] / "implement" / "phases" / "phase-1"
+    phase_dir.mkdir(parents=True, exist_ok=True)
+    criteria_file = phase_dir / "criteria.md"
+    feedback_file = phase_dir / "feedback.md"
+    criteria_file.write_text("- [x] done\n", encoding="utf-8")
+    feedback_file.write_text("# feedback\n", encoding="utf-8")
+
+    selection = superloop.ResolvedPhaseSelection(
+        phase_mode="single",
+        phase_ids=("phase-1",),
+        phases=(
+            superloop.PhasePlanPhase(
+                phase_id="phase-1",
+                title="Phase 1",
+                objective="Deliver phase 1",
+                in_scope=("code path A",),
+                out_of_scope=(),
+                dependencies=(),
+                acceptance_criteria=(superloop.PhasePlanCriterion(id="AC-1", text="done"),),
+                deliverables=("code",),
+                risks=(),
+                rollback=(),
+                status="planned",
+            ),
+        ),
+        explicit=True,
+    )
+    bundle = superloop.ArtifactBundle(
+        pair="implement",
+        scope="phase-local",
+        artifact_dir=phase_dir,
+        criteria_file=criteria_file,
+        feedback_file=feedback_file,
+        artifact_files={"criteria.md": criteria_file, "feedback.md": feedback_file},
+        allowed_verifier_prefixes=(f"{paths['task_root_rel']}/implement/phases/phase-1/",),
+        phase_id="phase-1",
+        phase_dir_key="phase-1",
+        phase_title="Phase 1",
+    )
+
+    question_stdout = (
+        '<loop-control>\n'
+        '{"schema":"docloop.loop_control/v1","kind":"question","question":"Need confirmation?\\nBest supposition: proceed safely.","best_supposition":"proceed safely"}\n'
+        '</loop-control>'
+    )
+
+    def fake_run_codex_phase(*args, **kwargs):
+        phase_name = args[4]
+        if phase_name != "producer":
+            raise AssertionError("Verifier should not run after a producer clarification question.")
+        with paths["decisions_file"].open("a", encoding="utf-8") as handle:
+            handle.write("Keep runtime-created producer header when body is non-empty\n")
+        return question_stdout
+
+    class StopAfterClarification(RuntimeError):
+        pass
+
+    original_append_clarification = superloop.append_clarification
+
+    def stop_after_clarification(*args, **kwargs):
+        original_append_clarification(*args, **kwargs)
+        raise StopAfterClarification
+
+    monkeypatch.setattr(superloop, "commit_tracked_changes", lambda *args, **kwargs: False)
+    monkeypatch.setattr(superloop, "run_codex_phase", fake_run_codex_phase)
+    monkeypatch.setattr(superloop, "ask_human", lambda question_text: "Approved answer")
+    monkeypatch.setattr(superloop, "append_clarification", stop_after_clarification)
+
+    with pytest.raises(StopAfterClarification):
+        execute_pair_cycles(
+            pair_cfg=PairConfig(name="implement", enabled=True, max_iterations=1),
+            pair="implement",
+            artifact_bundle=bundle,
+            session_file=run_paths["plan_session_file"],
+            root=tmp_path,
+            codex_command=fake_codex_command(),
+            run_id="run-1",
+            run_paths=run_paths,
+            paths=paths,
+            recorder=recorder,
+            task_root_rel=str(paths["task_root_rel"]),
+            use_git=False,
+            active_phase_selection=selection,
+            enabled_pairs=["implement"],
+            args=argparse.Namespace(full_auto_answers=False),
+            resume_checkpoint=None,
+            use_resume_state=False,
+        )
+
+    blocks = superloop.parse_decisions_headers(paths["decisions_file"].read_text(encoding="utf-8"))
+    assert [block.attrs.get("owner") for block in blocks] == ["implementer", "runtime", "runtime"]
+    assert [block.attrs.get("entry") for block in blocks] == [None, "questions", "answers"]
+    assert blocks[0].body == "Keep runtime-created producer header when body is non-empty\n"
+    assert blocks[0].attrs["turn_seq"] == blocks[1].attrs["turn_seq"] == blocks[2].attrs["turn_seq"] == "1"
+    assert blocks[1].attrs["qa_seq"] == blocks[2].attrs["qa_seq"] == "1"
+
+
+def test_execute_pair_cycles_does_not_precreate_verifier_decision_header(tmp_path: Path, monkeypatch):
+    paths = ensure_workspace(tmp_path, "task-1", "Implement feature X", "replace")
+    run_paths = create_run_paths(paths["runs_dir"], "run-1", "Implement feature X")
+    recorder = EventRecorder(run_id="run-1", events_file=run_paths["events_file"])
+
+    phase_dir = paths["task_dir"] / "implement" / "phases" / "phase-1"
+    phase_dir.mkdir(parents=True, exist_ok=True)
+    criteria_file = phase_dir / "criteria.md"
+    feedback_file = phase_dir / "feedback.md"
+    criteria_file.write_text("- [x] done\n", encoding="utf-8")
+    feedback_file.write_text("# feedback\n", encoding="utf-8")
+
+    selection = superloop.ResolvedPhaseSelection(
+        phase_mode="single",
+        phase_ids=("phase-1",),
+        phases=(
+            superloop.PhasePlanPhase(
+                phase_id="phase-1",
+                title="Phase 1",
+                objective="Deliver phase 1",
+                in_scope=("code path A",),
+                out_of_scope=(),
+                dependencies=(),
+                acceptance_criteria=(superloop.PhasePlanCriterion(id="AC-1", text="done"),),
+                deliverables=("code",),
+                risks=(),
+                rollback=(),
+                status="planned",
+            ),
+        ),
+        explicit=True,
+    )
+    bundle = superloop.ArtifactBundle(
+        pair="implement",
+        scope="phase-local",
+        artifact_dir=phase_dir,
+        criteria_file=criteria_file,
+        feedback_file=feedback_file,
+        artifact_files={"criteria.md": criteria_file, "feedback.md": feedback_file},
+        allowed_verifier_prefixes=(f"{paths['task_root_rel']}/implement/phases/phase-1/",),
+        phase_id="phase-1",
+        phase_dir_key="phase-1",
+        phase_title="Phase 1",
+    )
+
+    parse_results = [
+        superloop.LoopControl(question=None, promise=None, source="canonical", raw_payload=None),
+        superloop.LoopControl(
+            question=None,
+            promise=superloop.PROMISE_COMPLETE,
+            source="canonical",
+            raw_payload=None,
+        ),
+    ]
+
+    def fake_run_codex_phase(*args, **kwargs):
+        phase_name = args[4]
+        decisions_text = paths["decisions_file"].read_text(encoding="utf-8")
+        if phase_name == "producer":
+            assert 'owner="implementer"' in decisions_text
+            return "<loop-control></loop-control>"
+        if phase_name == "verifier":
+            assert decisions_text == ""
+            return "<loop-control></loop-control>"
+        raise AssertionError(f"Unexpected phase {phase_name}")
+
+    monkeypatch.setattr(superloop, "commit_tracked_changes", lambda *args, **kwargs: False)
+    monkeypatch.setattr(superloop, "run_codex_phase", fake_run_codex_phase)
+    monkeypatch.setattr(superloop, "parse_phase_control", lambda *args, **kwargs: parse_results.pop(0))
+    monkeypatch.setattr(superloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
+
+    status, code = execute_pair_cycles(
+        pair_cfg=PairConfig(name="implement", enabled=True, max_iterations=1),
+        pair="implement",
+        artifact_bundle=bundle,
+        session_file=run_paths["plan_session_file"],
+        root=tmp_path,
+        codex_command=fake_codex_command(),
+        run_id="run-1",
+        run_paths=run_paths,
+        paths=paths,
+        recorder=recorder,
+        task_root_rel=str(paths["task_root_rel"]),
+        use_git=False,
+        active_phase_selection=selection,
+        enabled_pairs=["implement"],
+        args=argparse.Namespace(full_auto_answers=False),
+        resume_checkpoint=None,
+        use_resume_state=False,
+    )
+
+    assert (status, code) == ("complete", 0)
+    assert paths["decisions_file"].read_text(encoding="utf-8") == ""
 
 
 def test_main_resume_without_session_file_starts_new_conversation_and_logs_notice(tmp_path: Path, monkeypatch):
@@ -1596,9 +2052,8 @@ def test_main_resume_without_session_file_starts_new_conversation_and_logs_notic
     assert exit_code == 0
     session_payload = json.loads(run_paths["plan_session_file"].read_text(encoding="utf-8"))
     assert session_payload["mode"] == "persistent"
-    run_log_text = run_paths["run_log"].read_text(encoding="utf-8")
     raw_log_text = run_paths["raw_phase_log"].read_text(encoding="utf-8")
-    assert "new conversation for the next phase" in run_log_text
+    assert "new conversation for the next phase" in raw_log_text
     assert "entry=session_recovery" in raw_log_text
 
 
@@ -1659,9 +2114,8 @@ def test_main_resume_with_missing_thread_id_starts_new_conversation_and_logs_not
 
     exit_code = superloop.main()
     assert exit_code == 0
-    run_log_text = run_paths["run_log"].read_text(encoding="utf-8")
     raw_log_text = run_paths["raw_phase_log"].read_text(encoding="utf-8")
-    assert "new conversation for the next phase" in run_log_text
+    assert "new conversation for the next phase" in raw_log_text
     assert "entry=session_recovery" in raw_log_text
 
 
@@ -1718,12 +2172,11 @@ def test_main_resume_reconstructs_missing_request_from_legacy_context_not_curren
     exit_code = superloop.main()
     assert exit_code == 0
     request_text = run_paths["request_file"].read_text(encoding="utf-8")
-    run_log_text = run_paths["run_log"].read_text(encoding="utf-8")
     raw_log_text = run_paths["raw_phase_log"].read_text(encoding="utf-8")
     assert "Legacy request from original run" in request_text
     assert "Newer mutable task request" not in request_text
     assert "entry=request_recovery" in raw_log_text
-    assert "reconstructed from the legacy task context" in run_log_text
+    assert "reconstructed from the legacy task context" in raw_log_text
 
 
 def test_main_without_phase_id_with_explicit_phase_plan_executes_all_phases_in_order(tmp_path: Path, monkeypatch):
@@ -1779,7 +2232,7 @@ def test_main_without_phase_id_with_explicit_phase_plan_executes_all_phases_in_o
     monkeypatch.setattr(
         superloop,
         "run_codex_phase",
-        lambda *args, **kwargs: calls.append((args[4], kwargs["active_phase_selection"].phase_ids[0])) or "<loop-control></loop-control>",
+        lambda *args, **kwargs: calls.append((args[5], kwargs["active_phase_selection"].phase_ids[0])) or "<loop-control></loop-control>",
     )
     monkeypatch.setattr(superloop, "parse_phase_control", lambda *args, **kwargs: control)
     monkeypatch.setattr(superloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
@@ -2203,7 +2656,7 @@ def test_main_resume_without_phase_id_resumes_first_incomplete_phase_and_dedupes
     monkeypatch.setattr(
         superloop,
         "run_codex_phase",
-        lambda *args, **kwargs: calls.append((args[4], args[3], kwargs["active_phase_selection"].phase_ids[0])) or "<loop-control></loop-control>",
+        lambda *args, **kwargs: calls.append((args[5], args[4], kwargs["active_phase_selection"].phase_ids[0])) or "<loop-control></loop-control>",
     )
     monkeypatch.setattr(superloop, "parse_phase_control", lambda *args, **kwargs: control)
     monkeypatch.setattr(superloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
@@ -2298,7 +2751,7 @@ def test_main_resume_skips_plan_pair_when_plan_already_completed(tmp_path: Path,
     monkeypatch.setattr(
         superloop,
         "run_codex_phase",
-        lambda *args, **kwargs: calls.append(args[4]) or "<loop-control></loop-control>",
+        lambda *args, **kwargs: calls.append(args[5]) or "<loop-control></loop-control>",
     )
     monkeypatch.setattr(superloop, "parse_phase_control", lambda *args, **kwargs: control)
     monkeypatch.setattr(superloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
@@ -2354,7 +2807,7 @@ def test_main_non_resume_does_not_skip_prior_run_phase_pair_completion(tmp_path:
     monkeypatch.setattr(
         superloop,
         "run_codex_phase",
-        lambda *args, **kwargs: calls.append((args[4], kwargs["active_phase_selection"].phase_ids[0])) or "<loop-control></loop-control>",
+        lambda *args, **kwargs: calls.append((args[5], kwargs["active_phase_selection"].phase_ids[0])) or "<loop-control></loop-control>",
     )
     monkeypatch.setattr(superloop, "parse_phase_control", lambda *args, **kwargs: control)
     monkeypatch.setattr(superloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
