@@ -1,0 +1,6 @@
+<superloop-decisions-header version="1" block_seq="1" owner="implementer" phase_id="implicit-phase" pair="implement" turn_seq="1" run_id="run-20260322T232746Z-3ea50405" ts="2026-03-22T23:27:46.139304+00:00" />
+Loop-control parse retries reuse the active phase session pending_clarification_note so the same phase thread receives explicit parse feedback without new prompt plumbing.
+<superloop-decisions-header version="1" block_seq="2" owner="implementer" phase_id="implicit-phase" pair="implement" turn_seq="1" run_id="run-20260322T233225Z-7f463ef9" ts="2026-03-22T23:32:25.946533+00:00" />
+Question rendering preserves prompt-defined body text and only synthesizes a Best supposition line as a fallback when the question text does not already contain one.
+<superloop-decisions-header version="1" block_seq="3" owner="implementer" phase_id="implicit-phase" pair="implement" turn_seq="2" run_id="run-20260322T232746Z-3ea50405" ts="2026-03-22T23:32:49.933219+00:00" />
+Question rendering preserves prompt-defined body text and only synthesizes a Best supposition line as a fallback when the question text does not already contain one.

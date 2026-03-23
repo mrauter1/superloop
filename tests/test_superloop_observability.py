@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 import superloop
 
+from loop_control import LoopQuestion
 from superloop import (
     CodexCommandConfig,
     ConfigError,
@@ -1703,6 +1704,34 @@ def test_append_clarification_logs_to_raw_phase_log_and_updates_session(tmp_path
     assert 'source="human"' in decisions_text
 
 
+def test_format_question_preserves_inline_best_supposition_text():
+    control = superloop.LoopControl(
+        question=LoopQuestion(
+            text="Need confirmation?\nBest supposition: proceed safely",
+            best_supposition="proceed safely",
+        ),
+        promise=None,
+        source="canonical",
+        raw_payload=None,
+    )
+
+    assert superloop.format_question(control) == "Need confirmation?\nBest supposition: proceed safely"
+
+
+def test_format_question_renders_best_supposition_fallback_when_missing_from_text():
+    control = superloop.LoopControl(
+        question=LoopQuestion(
+            text="Need confirmation?",
+            best_supposition="proceed safely",
+        ),
+        promise=None,
+        source="canonical",
+        raw_payload=None,
+    )
+
+    assert superloop.format_question(control) == "Need confirmation?\nBest supposition: proceed safely"
+
+
 def test_execute_pair_cycles_removes_empty_producer_block_before_runtime_question_blocks(tmp_path: Path, monkeypatch):
     paths = ensure_workspace(tmp_path, "task-1", "Implement feature X", "replace")
     run_paths = create_run_paths(paths["runs_dir"], "run-1", "Implement feature X")
@@ -1909,6 +1938,232 @@ def test_execute_pair_cycles_preserves_non_empty_producer_block_on_question_turn
     assert blocks[0].body == "Keep runtime-created producer header when body is non-empty\n"
     assert blocks[0].attrs["turn_seq"] == blocks[1].attrs["turn_seq"] == blocks[2].attrs["turn_seq"] == "1"
     assert blocks[1].attrs["qa_seq"] == blocks[2].attrs["qa_seq"] == "1"
+
+
+def test_execute_pair_cycles_retries_malformed_producer_loop_control_once(tmp_path: Path, monkeypatch):
+    paths = ensure_workspace(tmp_path, "task-1", "Implement feature X", "replace")
+    run_paths = create_run_paths(paths["runs_dir"], "run-1", "Implement feature X")
+    recorder = EventRecorder(run_id="run-1", events_file=run_paths["events_file"])
+
+    phase_dir = paths["task_dir"] / "implement" / "phases" / "phase-1"
+    phase_dir.mkdir(parents=True, exist_ok=True)
+    criteria_file = phase_dir / "criteria.md"
+    feedback_file = phase_dir / "feedback.md"
+    criteria_file.write_text("- [x] done\n", encoding="utf-8")
+    feedback_file.write_text("# feedback\n", encoding="utf-8")
+
+    selection = superloop.ResolvedPhaseSelection(
+        phase_mode="single",
+        phase_ids=("phase-1",),
+        phases=(
+            superloop.PhasePlanPhase(
+                phase_id="phase-1",
+                title="Phase 1",
+                objective="Deliver phase 1",
+                in_scope=("code path A",),
+                out_of_scope=(),
+                dependencies=(),
+                acceptance_criteria=(superloop.PhasePlanCriterion(id="AC-1", text="done"),),
+                deliverables=("code",),
+                risks=(),
+                rollback=(),
+                status="planned",
+            ),
+        ),
+        explicit=True,
+    )
+    bundle = superloop.ArtifactBundle(
+        pair="implement",
+        scope="phase-local",
+        artifact_dir=phase_dir,
+        criteria_file=criteria_file,
+        feedback_file=feedback_file,
+        artifact_files={"criteria.md": criteria_file, "feedback.md": feedback_file},
+        allowed_verifier_prefixes=(f"{paths['task_root_rel']}/implement/phases/phase-1/",),
+        phase_id="phase-1",
+        phase_dir_key="phase-1",
+        phase_title="Phase 1",
+    )
+
+    question_stdout = (
+        '<loop-control>\n'
+        '{"schema":"docloop.loop_control/v1","kind":"question","question":"Need confirmation?","best_supposition":"proceed safely"}\n'
+        '</loop-control>'
+    )
+    producer_calls = 0
+    asked_questions: list[str] = []
+
+    def fake_run_codex_phase(*args, **kwargs):
+        nonlocal producer_calls
+        phase_name = args[4]
+        assert phase_name == "producer"
+        producer_calls += 1
+        session_payload = json.loads(Path(args[10]).read_text(encoding="utf-8"))
+        if producer_calls == 1:
+            assert session_payload["pending_clarification_note"] is None
+            return "<loop-control>{not-json}</loop-control>"
+        assert "Loop-control parse feedback" in session_payload["pending_clarification_note"]
+        assert "Invalid canonical loop-control JSON" in session_payload["pending_clarification_note"]
+        session_payload["pending_clarification_note"] = None
+        Path(args[10]).write_text(json.dumps(session_payload, indent=2) + "\n", encoding="utf-8")
+        return question_stdout
+
+    class StopAfterClarification(RuntimeError):
+        pass
+
+    original_append_clarification = superloop.append_clarification
+
+    def stop_after_clarification(*args, **kwargs):
+        original_append_clarification(*args, **kwargs)
+        raise StopAfterClarification
+
+    def fake_ask_human(question_text: str) -> str:
+        asked_questions.append(question_text)
+        return "Approved answer"
+
+    monkeypatch.setattr(superloop, "commit_tracked_changes", lambda *args, **kwargs: False)
+    monkeypatch.setattr(superloop, "run_codex_phase", fake_run_codex_phase)
+    monkeypatch.setattr(superloop, "ask_human", fake_ask_human)
+    monkeypatch.setattr(superloop, "append_clarification", stop_after_clarification)
+
+    with pytest.raises(StopAfterClarification):
+        execute_pair_cycles(
+            pair_cfg=PairConfig(name="implement", enabled=True, max_iterations=1),
+            pair="implement",
+            artifact_bundle=bundle,
+            session_file=run_paths["plan_session_file"],
+            root=tmp_path,
+            codex_command=fake_codex_command(),
+            run_id="run-1",
+            run_paths=run_paths,
+            paths=paths,
+            recorder=recorder,
+            task_root_rel=str(paths["task_root_rel"]),
+            use_git=False,
+            active_phase_selection=selection,
+            enabled_pairs=["implement"],
+            args=argparse.Namespace(full_auto_answers=False),
+            resume_checkpoint=None,
+            use_resume_state=False,
+        )
+
+    assert producer_calls == 2
+    assert asked_questions == ["Need confirmation?\nBest supposition: proceed safely"]
+    run_raw_text = run_paths["raw_phase_log"].read_text(encoding="utf-8")
+    assert "entry=loop_control_retry" in run_raw_text
+    assert "Invalid canonical loop-control JSON" in run_raw_text
+
+
+def test_execute_pair_cycles_retries_malformed_verifier_loop_control_once(tmp_path: Path, monkeypatch):
+    paths = ensure_workspace(tmp_path, "task-1", "Implement feature X", "replace")
+    run_paths = create_run_paths(paths["runs_dir"], "run-1", "Implement feature X")
+    recorder = EventRecorder(run_id="run-1", events_file=run_paths["events_file"])
+
+    phase_dir = paths["task_dir"] / "implement" / "phases" / "phase-1"
+    phase_dir.mkdir(parents=True, exist_ok=True)
+    criteria_file = phase_dir / "criteria.md"
+    feedback_file = phase_dir / "feedback.md"
+    criteria_file.write_text("- [x] done\n", encoding="utf-8")
+    feedback_file.write_text("# feedback\n", encoding="utf-8")
+
+    selection = superloop.ResolvedPhaseSelection(
+        phase_mode="single",
+        phase_ids=("phase-1",),
+        phases=(
+            superloop.PhasePlanPhase(
+                phase_id="phase-1",
+                title="Phase 1",
+                objective="Deliver phase 1",
+                in_scope=("code path A",),
+                out_of_scope=(),
+                dependencies=(),
+                acceptance_criteria=(superloop.PhasePlanCriterion(id="AC-1", text="done"),),
+                deliverables=("code",),
+                risks=(),
+                rollback=(),
+                status="planned",
+            ),
+        ),
+        explicit=True,
+    )
+    bundle = superloop.ArtifactBundle(
+        pair="implement",
+        scope="phase-local",
+        artifact_dir=phase_dir,
+        criteria_file=criteria_file,
+        feedback_file=feedback_file,
+        artifact_files={"criteria.md": criteria_file, "feedback.md": feedback_file},
+        allowed_verifier_prefixes=(f"{paths['task_root_rel']}/implement/phases/phase-1/",),
+        phase_id="phase-1",
+        phase_dir_key="phase-1",
+        phase_title="Phase 1",
+    )
+
+    calls: list[str] = []
+
+    def fake_run_codex_phase(*args, **kwargs):
+        phase_name = args[4]
+        session_payload = json.loads(Path(args[10]).read_text(encoding="utf-8"))
+        calls.append(phase_name)
+        if phase_name == "producer":
+            assert session_payload["pending_clarification_note"] is None
+            return "producer output"
+        assert phase_name == "verifier"
+        if calls.count("verifier") == 1:
+            assert session_payload["pending_clarification_note"] is None
+            return "<loop-control>{not-json}</loop-control>"
+        assert "Loop-control parse feedback" in session_payload["pending_clarification_note"]
+        assert "Invalid canonical loop-control JSON" in session_payload["pending_clarification_note"]
+        session_payload["pending_clarification_note"] = None
+        Path(args[10]).write_text(json.dumps(session_payload, indent=2) + "\n", encoding="utf-8")
+        return '<loop-control>{"schema":"docloop.loop_control/v1","kind":"promise","promise":"COMPLETE"}</loop-control>'
+
+    monkeypatch.setattr(superloop, "commit_tracked_changes", lambda *args, **kwargs: False)
+    monkeypatch.setattr(superloop, "run_codex_phase", fake_run_codex_phase)
+    monkeypatch.setattr(superloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
+
+    status, code = execute_pair_cycles(
+        pair_cfg=PairConfig(name="implement", enabled=True, max_iterations=1),
+        pair="implement",
+        artifact_bundle=bundle,
+        session_file=run_paths["plan_session_file"],
+        root=tmp_path,
+        codex_command=fake_codex_command(),
+        run_id="run-1",
+        run_paths=run_paths,
+        paths=paths,
+        recorder=recorder,
+        task_root_rel=str(paths["task_root_rel"]),
+        use_git=False,
+        active_phase_selection=selection,
+        enabled_pairs=["implement"],
+        args=argparse.Namespace(full_auto_answers=False),
+        resume_checkpoint=None,
+        use_resume_state=False,
+    )
+
+    assert (status, code) == ("complete", 0)
+    assert calls == ["producer", "verifier", "verifier"]
+    run_raw_text = run_paths["raw_phase_log"].read_text(encoding="utf-8")
+    assert "entry=loop_control_retry" in run_raw_text
+    assert "phase=verifier" in run_raw_text
+
+
+def test_parse_phase_control_retries_once_before_failing():
+    feedback_notes: list[str] = []
+
+    with pytest.raises(SystemExit, match="1"):
+        superloop.parse_phase_control(
+            "<loop-control>{not-json}</loop-control>",
+            "producer",
+            "implement",
+            retry_once=lambda feedback_note: feedback_notes.append(feedback_note)
+            or "<loop-control>{still-not-json}</loop-control>",
+        )
+
+    assert len(feedback_notes) == 1
+    assert "Loop-control parse feedback" in feedback_notes[0]
+    assert "Invalid canonical loop-control JSON" in feedback_notes[0]
 
 
 def test_execute_pair_cycles_does_not_precreate_verifier_decision_header(tmp_path: Path, monkeypatch):

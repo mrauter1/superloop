@@ -1,0 +1,36 @@
+{
+  "task_id": "render-best-supposition-in-questions-on-loop-con-1dfc6af2",
+  "created_at": "2026-03-22T23:27:46.072994+00:00",
+  "request_text": "Render best supposition in questions; on loop-control parse failures, include parse error feedback and retry once before failing.",
+  "request_updated_at": "2026-03-22T23:32:25.878373+00:00",
+  "phase_plan_path": "/workspace/superloop/.superloop/tasks/render-best-supposition-in-questions-on-loop-con-1dfc6af2/plan/phase_plan.yaml",
+  "phase_plan_version": 1,
+  "active_phase_selection": {
+    "run_id": "run-20260322T233225Z-7f463ef9",
+    "mode": "single",
+    "phase_ids": [
+      "implicit-phase"
+    ],
+    "explicit": false,
+    "current_phase_index": 1,
+    "current_phase_id": null
+  },
+  "phase_status": {
+    "implicit-phase": "completed"
+  },
+  "phase_history": [
+    {
+      "phase_id": "implicit-phase",
+      "run_id": "run-20260322T232746Z-3ea50405",
+      "status": "in_progress",
+      "ts": "2026-03-22T23:27:46.108667+00:00"
+    },
+    {
+      "phase_id": "implicit-phase",
+      "run_id": "run-20260322T232746Z-3ea50405",
+      "status": "completed",
+      "ts": "2026-03-22T23:34:42.852936+00:00",
+      "pair": "implement"
+    }
+  ]
+}
