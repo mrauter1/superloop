@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+
+{% block title %}Login | Stage 1 AI Triage{% endblock %}
+
+{% block body %}
+<section class="panel panel--narrow">
+  <p class="eyebrow">Internal access</p>
+  <h1>Sign in</h1>
+  <p class="muted">Use your local Stage 1 account credentials.</p>
+  <form method="post" action="/login" class="stack">
+    <label class="field">
+      <span>Email</span>
+      <input type="email" name="email" value="{{ email or '' }}" autocomplete="username" required>
+    </label>
+    <label class="field">
+      <span>Password</span>
+      <input type="password" name="password" autocomplete="current-password" required>
+    </label>
+    <label class="checkbox">
+      <input type="checkbox" name="remember_me">
+      <span>Remember me</span>
+    </label>
+    <button type="submit" class="button">Sign in</button>
+  </form>
+</section>
+{% endblock %}

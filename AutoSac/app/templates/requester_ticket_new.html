@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+
+{% block title %}New Ticket | Stage 1 AI Triage{% endblock %}
+
+{% block body %}
+<section class="panel">
+  <p class="eyebrow">Requester view</p>
+  <h1>Open a ticket</h1>
+  <p class="muted">Describe the issue in your own words. Screenshots are optional.</p>
+  <form method="post" action="/app/tickets" enctype="multipart/form-data" class="stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label class="field">
+      <span>Short title</span>
+      <input type="text" name="title" value="{{ form_title or '' }}" maxlength="120">
+    </label>
+    <label class="field">
+      <span>Description</span>
+      <textarea name="description" rows="8" required>{{ form_description or '' }}</textarea>
+    </label>
+    <label class="field">
+      <span>Images</span>
+      <input type="file" name="attachments" accept="image/png,image/jpeg" multiple>
+      <small>Up to 3 PNG or JPEG files, 5 MiB each.</small>
+    </label>
+    <label class="checkbox">
+      <input type="checkbox" name="urgent" {% if form_urgent %}checked{% endif %}>
+      <span>Mark as urgent</span>
+    </label>
+    <button type="submit" class="button">Create ticket</button>
+  </form>
+</section>
+{% endblock %}

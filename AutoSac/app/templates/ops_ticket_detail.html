@@ -1,0 +1,251 @@
+{% extends "base.html" %}
+
+{% block title %}{{ ticket.reference }} | Ops | Stage 1 AI Triage{% endblock %}
+
+{% block body %}
+<section class="page-header page-header--stack">
+  <div class="ticket-card__meta">
+    <span class="ticket-ref">{{ ticket.reference }}</span>
+    <span class="status-pill">{{ ops_status_label(ticket.status) }}</span>
+    {% if ticket.ticket_class %}
+    <span class="status-pill">{{ ticket.ticket_class.replace("_", " ").title() }}</span>
+    {% endif %}
+    {% if ticket.urgent %}
+    <span class="urgent-pill">Urgent</span>
+    {% endif %}
+    {% if pending_draft %}
+    <span class="updated-pill">Draft pending approval</span>
+    {% endif %}
+  </div>
+  <h1>{{ ticket.title }}</h1>
+  <p class="muted">
+    Requester: {{ creator.display_name if creator else "Unknown" }}
+    · Assigned: {{ assignee.display_name if assignee else "Unassigned" }}
+    · Updated {{ ticket.updated_at.strftime("%Y-%m-%d %H:%M UTC") }}
+  </p>
+</section>
+
+<section class="detail-grid">
+  <div class="stack">
+    <section class="panel stack">
+      <div class="thread-header">
+        <h2>Public thread</h2>
+      </div>
+      {% for message in public_thread %}
+      <article class="message-card">
+        <div class="message-card__meta">
+          <strong>{{ message.author_label }}</strong>
+          <span>{{ message.created_at.strftime("%Y-%m-%d %H:%M UTC") }}</span>
+        </div>
+        <div class="message-card__body">{{ message.body_html | safe }}</div>
+        {% if message.attachments %}
+        <ul class="attachment-list">
+          {% for attachment in message.attachments %}
+          <li>
+            <a href="/attachments/{{ attachment.id }}">{{ attachment.original_filename }}</a>
+            <span class="muted">{{ attachment.mime_type }} · {{ attachment.size_bytes }} bytes</span>
+          </li>
+          {% endfor %}
+        </ul>
+        {% endif %}
+      </article>
+      {% else %}
+      <p class="muted">No public messages yet.</p>
+      {% endfor %}
+    </section>
+
+    <section class="panel stack">
+      <div class="thread-header">
+        <h2>Internal thread</h2>
+      </div>
+      {% for message in internal_thread %}
+      <article class="message-card message-card--internal">
+        <div class="message-card__meta">
+          <strong>{{ message.author_label }}</strong>
+          <span>{{ message.created_at.strftime("%Y-%m-%d %H:%M UTC") }}</span>
+        </div>
+        <div class="message-card__body">{{ message.body_html | safe }}</div>
+      </article>
+      {% else %}
+      <p class="muted">No internal notes yet.</p>
+      {% endfor %}
+    </section>
+  </div>
+
+  <div class="stack">
+    <section class="panel stack">
+      <h2>AI analysis</h2>
+      <dl class="meta-list">
+        <div>
+          <dt>Class</dt>
+          <dd>{{ ticket.ticket_class or "Unclassified" }}</dd>
+        </div>
+        <div>
+          <dt>Confidence</dt>
+          <dd>{{ ticket.ai_confidence if ticket.ai_confidence is not none else "Unknown" }}</dd>
+        </div>
+        <div>
+          <dt>Impact</dt>
+          <dd>{{ ticket.impact_level or "unknown" }}</dd>
+        </div>
+        <div>
+          <dt>Development needed</dt>
+          <dd>{{ "Yes" if ticket.development_needed else "No" if ticket.development_needed is not none else "Unknown" }}</dd>
+        </div>
+        <div>
+          <dt>Requester language</dt>
+          <dd>{{ ticket.requester_language or "Unknown" }}</dd>
+        </div>
+        <div>
+          <dt>Last action</dt>
+          <dd>{{ ticket.last_ai_action or "None yet" }}</dd>
+        </div>
+        <div>
+          <dt>Latest run</dt>
+          <dd>{{ latest_run.status if latest_run else "No runs yet" }}</dd>
+        </div>
+        <div>
+          <dt>Requeue requested</dt>
+          <dd>{{ "Yes" if ticket.requeue_requested else "No" }}</dd>
+        </div>
+      </dl>
+      {% if ai_summary_short or ai_summary_internal %}
+      <div class="stack">
+        {% if ai_summary_short %}
+        <div>
+          <strong>Summary</strong>
+          <p class="muted">{{ ai_summary_short }}</p>
+        </div>
+        {% endif %}
+        {% if ai_summary_internal %}
+        <div>
+          <strong>Internal summary</strong>
+          <p class="muted">{{ ai_summary_internal }}</p>
+        </div>
+        {% endif %}
+      </div>
+      {% endif %}
+      {% if ai_relevant_paths %}
+      <div class="stack">
+        <strong>Relevant repo/docs paths</strong>
+        <ul class="attachment-list">
+          {% for item in ai_relevant_paths %}
+          <li><code>{{ item.path }}</code> <span class="muted">{{ item.reason }}</span></li>
+          {% endfor %}
+        </ul>
+      </div>
+      {% endif %}
+      {% if latest_ai_note %}
+      <div class="stack">
+        <strong>Latest AI note</strong>
+        <div class="message-card__body">{{ latest_ai_note_html | safe }}</div>
+      </div>
+      {% endif %}
+      {% if latest_run %}
+      <div class="stack">
+        <strong>Run artifacts</strong>
+        <ul class="attachment-list">
+          {% if latest_run.prompt_path %}<li><code>{{ latest_run.prompt_path }}</code></li>{% endif %}
+          {% if latest_run.schema_path %}<li><code>{{ latest_run.schema_path }}</code></li>{% endif %}
+          {% if latest_run.final_output_path %}<li><code>{{ latest_run.final_output_path }}</code></li>{% endif %}
+          {% if latest_run.stdout_jsonl_path %}<li><code>{{ latest_run.stdout_jsonl_path }}</code></li>{% endif %}
+          {% if latest_run.stderr_path %}<li><code>{{ latest_run.stderr_path }}</code></li>{% endif %}
+        </ul>
+      </div>
+      {% endif %}
+      <form method="post" action="/ops/tickets/{{ ticket.reference }}/rerun-ai">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit" class="button">Rerun AI</button>
+      </form>
+    </section>
+
+    {% if pending_draft %}
+    <section class="panel stack">
+      <h2>Pending AI draft</h2>
+      <div class="message-card__body">{{ pending_draft_html | safe }}</div>
+      <form method="post" action="/ops/drafts/{{ pending_draft.id }}/approve-publish" class="stack">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <label class="field">
+          <span>Next status</span>
+          <select name="next_status">
+            {% for value in reply_status_options %}
+            <option value="{{ value }}" {% if value == "waiting_on_user" %}selected{% endif %}>{{ ops_status_label(value) }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <button type="submit" class="button">Approve and publish</button>
+      </form>
+      <form method="post" action="/ops/drafts/{{ pending_draft.id }}/reject">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit" class="button button--ghost">Reject draft</button>
+      </form>
+    </section>
+    {% endif %}
+
+    <section class="panel stack">
+      <h2>Assignment</h2>
+      <form method="post" action="/ops/tickets/{{ ticket.reference }}/assign" class="stack">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <label class="field">
+          <span>Assigned to</span>
+          <select name="assigned_to_user_id">
+            <option value="">Unassigned</option>
+            {% for user in ops_users %}
+            <option value="{{ user.id }}" {% if assignee and user.id == assignee.id %}selected{% endif %}>{{ user.display_name }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <button type="submit" class="button">Save assignment</button>
+      </form>
+    </section>
+
+    <section class="panel stack">
+      <h2>Status</h2>
+      <form method="post" action="/ops/tickets/{{ ticket.reference }}/set-status" class="stack">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <label class="field">
+          <span>Status</span>
+          <select name="next_status">
+            {% for value in status_options %}
+            <option value="{{ value }}" {% if value == ticket.status %}selected{% endif %}>{{ ops_status_label(value) }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <button type="submit" class="button">Update status</button>
+      </form>
+    </section>
+
+    <section class="panel stack">
+      <h2>Public reply</h2>
+      <form method="post" action="/ops/tickets/{{ ticket.reference }}/reply-public" class="stack">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <label class="field">
+          <span>Reply</span>
+          <textarea name="body" rows="6" required></textarea>
+        </label>
+        <label class="field">
+          <span>Next status</span>
+          <select name="next_status">
+            {% for value in reply_status_options %}
+            <option value="{{ value }}" {% if value == "waiting_on_user" %}selected{% endif %}>{{ ops_status_label(value) }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <button type="submit" class="button">Send public reply</button>
+      </form>
+    </section>
+
+    <section class="panel stack">
+      <h2>Internal note</h2>
+      <form method="post" action="/ops/tickets/{{ ticket.reference }}/note-internal" class="stack">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <label class="field">
+          <span>Note</span>
+          <textarea name="body" rows="6" required></textarea>
+        </label>
+        <button type="submit" class="button">Add internal note</button>
+      </form>
+    </section>
+  </div>
+</section>
+{% endblock %}

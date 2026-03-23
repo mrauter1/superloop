@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+
+{% block title %}My Tickets | Stage 1 AI Triage{% endblock %}
+
+{% block body %}
+<section class="page-header">
+  <div>
+    <p class="eyebrow">Requester view</p>
+    <h1>My tickets</h1>
+  </div>
+  <a class="button" href="/app/tickets/new">Open a ticket</a>
+</section>
+
+{% if tickets %}
+<section class="ticket-list stack">
+  {% for row in tickets %}
+  {% set ticket = row.ticket %}
+  <a class="ticket-card" href="/app/tickets/{{ ticket.reference }}">
+    <div class="ticket-card__meta">
+      <span class="ticket-ref">{{ ticket.reference }}</span>
+      <span class="status-pill">{{ requester_status_label(ticket.status) }}</span>
+      {% if ticket.urgent %}
+      <span class="urgent-pill">Urgent</span>
+      {% endif %}
+      {% if row.updated_for_user %}
+      <span class="updated-pill">Updated</span>
+      {% endif %}
+    </div>
+    <h2>{{ ticket.title }}</h2>
+    <p class="ticket-card__time">Last updated {{ ticket.updated_at.strftime("%Y-%m-%d %H:%M UTC") }}</p>
+  </a>
+  {% endfor %}
+</section>
+{% else %}
+<section class="panel">
+  <h2>No tickets yet</h2>
+  <p class="muted">Start with a short description and optional screenshots.</p>
+  <a class="button" href="/app/tickets/new">Create your first ticket</a>
+</section>
+{% endif %}
+{% endblock %}

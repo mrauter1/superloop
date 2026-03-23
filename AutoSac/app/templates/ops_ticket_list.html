@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+
+{% block title %}Ops Queue | Stage 1 AI Triage{% endblock %}
+
+{% block body %}
+<section class="page-header">
+  <div>
+    <p class="eyebrow">Dev/TI view</p>
+    <h1>Ticket queue</h1>
+  </div>
+  <a class="button button--ghost" href="/ops/board">Open board view</a>
+</section>
+
+{% include "ops_filters.html" %}
+{% include "ops_ticket_rows.html" %}
+{% endblock %}
