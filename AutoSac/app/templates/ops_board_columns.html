@@ -1,0 +1,39 @@
+{% set ordered_statuses = ["new", "ai_triage", "waiting_on_user", "waiting_on_dev_ti", "resolved"] %}
+<section class="ops-board">
+  {% for status in ordered_statuses %}
+  <div class="ops-column">
+    <div class="ops-column__header">
+      <h2>{{ ops_status_label(status) }}</h2>
+      <span class="ticket-ref">{{ grouped_rows[status] | length }}</span>
+    </div>
+    <div class="ops-column__body">
+      {% for row in grouped_rows[status] %}
+      {% set ticket = row.ticket %}
+      <a class="ticket-card ticket-card--compact" href="/ops/tickets/{{ ticket.reference }}">
+        <div class="ticket-card__meta">
+          <span class="ticket-ref">{{ ticket.reference }}</span>
+          {% if ticket.urgent %}
+          <span class="urgent-pill">Urgent</span>
+          {% endif %}
+          {% if row.updated_for_user %}
+          <span class="updated-pill">Updated</span>
+          {% endif %}
+        </div>
+        <h3>{{ ticket.title }}</h3>
+        <p class="muted">{{ row.creator.display_name if row.creator else "Unknown requester" }}</p>
+        {% if ticket.ticket_class %}
+        <p class="muted">{{ ticket.ticket_class.replace("_", " ").title() }}</p>
+        {% endif %}
+        {% if row.pending_draft %}
+        <p class="muted">Pending draft approval</p>
+        {% endif %}
+      </a>
+      {% else %}
+      <div class="panel panel--quiet">
+        <p class="muted">No tickets</p>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endfor %}
+</section>

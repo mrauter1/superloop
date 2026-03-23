@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+
+{% block title %}{{ ticket.reference }} | Stage 1 AI Triage{% endblock %}
+
+{% block body %}
+<section class="page-header page-header--stack">
+  <div class="ticket-card__meta">
+    <span class="ticket-ref">{{ ticket.reference }}</span>
+    <span class="status-pill">{{ requester_status_label(ticket.status) }}</span>
+    {% if ticket.urgent %}
+    <span class="urgent-pill">Urgent</span>
+    {% endif %}
+  </div>
+  <h1>{{ ticket.title }}</h1>
+</section>
+
+<section class="thread stack">
+  {% for message in thread %}
+  <article class="message-card">
+    <div class="message-card__meta">
+      <strong>{{ message.author_label }}</strong>
+      <span>{{ message.created_at.strftime("%Y-%m-%d %H:%M UTC") }}</span>
+    </div>
+    <div class="message-card__body">{{ message.body_html | safe }}</div>
+    {% if message.attachments %}
+    <ul class="attachment-list">
+      {% for attachment in message.attachments %}
+      <li>
+        <a href="/attachments/{{ attachment.id }}">{{ attachment.original_filename }}</a>
+        <span class="muted">{{ attachment.mime_type }} · {{ attachment.size_bytes }} bytes</span>
+      </li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+  </article>
+  {% endfor %}
+</section>
+
+<section class="panel stack">
+  <h2>Reply</h2>
+  <form method="post" action="/app/tickets/{{ ticket.reference }}/reply" enctype="multipart/form-data" class="stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label class="field">
+      <span>Message</span>
+      <textarea name="body" rows="6" required>{{ reply_body or '' }}</textarea>
+    </label>
+    <label class="field">
+      <span>Images</span>
+      <input type="file" name="attachments" accept="image/png,image/jpeg" multiple>
+      <small>Up to 3 PNG or JPEG files, 5 MiB each.</small>
+    </label>
+    <button type="submit" class="button">Send reply</button>
+  </form>
+  {% if ticket.status != "resolved" %}
+  <form method="post" action="/app/tickets/{{ ticket.reference }}/resolve">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button type="submit" class="button button--ghost">Mark resolved</button>
+  </form>
+  {% endif %}
+</section>
+{% endblock %}

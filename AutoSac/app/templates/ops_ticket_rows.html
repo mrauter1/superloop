@@ -1,0 +1,34 @@
+{% if rows %}
+<section class="ticket-list stack">
+  {% for row in rows %}
+  {% set ticket = row.ticket %}
+  <a class="ticket-card" href="/ops/tickets/{{ ticket.reference }}">
+    <div class="ticket-card__meta">
+      <span class="ticket-ref">{{ ticket.reference }}</span>
+      <span class="status-pill">{{ ops_status_label(ticket.status) }}</span>
+      {% if ticket.ticket_class %}
+      <span class="status-pill">{{ ticket.ticket_class.replace("_", " ").title() }}</span>
+      {% endif %}
+      {% if ticket.urgent %}
+      <span class="urgent-pill">Urgent</span>
+      {% endif %}
+      {% if row.updated_for_user %}
+      <span class="updated-pill">Updated</span>
+      {% endif %}
+      {% if row.pending_draft %}
+      <span class="updated-pill">Needs approval</span>
+      {% endif %}
+    </div>
+    <h2>{{ ticket.title }}</h2>
+    <p class="muted">Requester: {{ row.creator.display_name if row.creator else "Unknown" }}</p>
+    <p class="muted">Assigned: {{ row.assignee.display_name if row.assignee else "Unassigned" }}</p>
+    <p class="ticket-card__time">Last updated {{ ticket.updated_at.strftime("%Y-%m-%d %H:%M UTC") }}</p>
+  </a>
+  {% endfor %}
+</section>
+{% else %}
+<section class="panel">
+  <h2>No matching tickets</h2>
+  <p class="muted">Adjust the filters to expand the queue.</p>
+</section>
+{% endif %}

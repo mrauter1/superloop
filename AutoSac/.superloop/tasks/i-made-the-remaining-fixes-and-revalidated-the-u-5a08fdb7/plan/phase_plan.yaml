@@ -1,0 +1,235 @@
+version: 1
+task_id: i-made-the-remaining-fixes-and-revalidated-the-u-5a08fdb7
+request_snapshot_ref: /workspace/superloop/AutoSac/.superloop/tasks/i-made-the-remaining-fixes-and-revalidated-the-u-5a08fdb7/runs/run-20260323T005437Z-5ff4890a/request.md
+phases:
+- phase_id: foundation-persistence
+  title: Foundation and Persistence
+  objective: Establish the repository skeleton, configuration, full PostgreSQL schema,
+    and exact workspace/bootstrap artifacts that every later Stage 1 path depends
+    on.
+  status: planned
+  in_scope:
+  - Create the Stage 1 module layout, dependency manifests, templates/static directories,
+    and local run/bootstrap scripts.
+  - Implement config loading, DB session wiring, ORM models, and the full initial
+    Alembic migration with all required indexes and enum-like constraints.
+  - Implement shared primitives for server-side sessions, status-history recording,
+    updated_at management, reference/title generation, and queue-safe run creation.
+  - Generate the exact workspace AGENTS.md and .agents/skills/stage1-triage/SKILL.md
+    files and initialize the workspace git repo with an empty initial commit when
+    needed.
+  out_of_scope:
+  - Requester ticket UI flows
+  - Dev/TI board and ticket detail UI
+  - Codex execution and AI publication logic
+  dependencies: []
+  acceptance_criteria:
+  - id: AC-1
+    text: The repository contains the required Stage 1 package structure, dependency
+      manifest, env example, and bootstrap/run scripts.
+  - id: AC-2
+    text: The initial migration creates the full PRD schema including the partial
+      unique ai_runs index and the sessions table required for opaque-token auth.
+  - id: AC-3
+    text: Workspace bootstrap writes the exact mandated AGENTS.md and SKILL.md content
+      at the exact required paths and verifies the repo/manuals mounts.
+  - id: AC-4
+    text: The shared foundation exposes the exact PRD route, CLI, environment, and
+      filesystem contracts as stable constants or configuration checks so later phases
+      do not drift them.
+  deliverables:
+  - Shared Python package skeleton with config, DB wiring, models, migrations, security,
+    and permissions primitives
+  - Bootstrap and user-management CLI scripts
+  - Exact workspace file templates/constants, contract-sensitive path/config constants,
+    and initial migration
+  risks:
+  - Schema or bootstrap drift here will force rework across every later phase.
+  - If auth/session primitives are wrong, all UI flows will need rewiring.
+  rollback:
+  - Revert code and drop the greenfield database before any persistent data is created.
+  - Remove generated workspace and uploads directories created during bootstrap testing.
+- phase_id: auth-requester
+  title: Authentication and Requester Workflow
+  objective: Deliver local-account login plus the complete requester-facing ticket
+    create, view, reply, resolve, and attachment flows on top of the shared schema.
+  status: planned
+  in_scope:
+  - Implement PostgreSQL-backed opaque-token sessions, remember-me expiry, logout,
+    CSRF protection, and role-aware auth guards without using signed-cookie primary
+    auth state.
+  - Build requester pages and routes for /app, /app/tickets, /app/tickets/new, /app/tickets/{reference},
+    reply, resolve, and authenticated attachment download.
+  - Implement provisional title generation, explicit multipart parser limits, image
+    validation/storage, requester-visible status mapping, and ticket view tracking
+    semantics.
+  - Implement requester-triggered enqueue, requeue, reopen, and resolved flows using
+    shared transaction helpers.
+  out_of_scope:
+  - Dev/TI board/detail controls
+  - Worker-side Codex processing
+  - AI draft review actions
+  dependencies:
+  - foundation-persistence
+  acceptance_criteria:
+  - id: AC-1
+    text: Login/logout works with server-side sessions only, including remember-me
+      expiry and CSRF protection on all requester POST routes.
+  - id: AC-2
+    text: Requesters can create, view, reply to, and resolve only their own tickets
+      with up to three validated PNG or JPEG uploads of up to 5 MiB each.
+  - id: AC-3
+    text: Requester detail views and successful ticket-mutating POSTs update ticket_views
+      correctly while requester list pages do not mark tickets as read.
+  - id: AC-4
+    text: Requester routes preserve the exact PRD surface and status mapping without
+      exposing internal thread content, internal states, or ops-only controls.
+  deliverables:
+  - Auth routes, dependencies, and templates
+  - Requester routes, templates, upload handling, and attachment serving
+  - Shared requester workflow services for create, reply, resolve, view tracking,
+    and run enqueue/requeue
+  risks:
+  - Multipart defaults can silently violate product limits if not overridden at parse
+    time.
+  - Access-control mistakes here would expose other users tickets or attachments.
+  rollback:
+  - Disable requester routes and revert code while preserving schema.
+  - Remove invalid test uploads generated during development.
+- phase_id: ops-workflow
+  title: Dev/TI Workflow Surface
+  objective: Add the operational board/detail experience and human workflow controls
+    while preserving the same shared mutation invariants used by requester flows.
+  status: planned
+  in_scope:
+  - Build /ops, /ops/board, and /ops/tickets/{reference} with grouped status columns,
+    required filters, ticket detail, and explicit public/internal thread separation.
+  - Implement assignment, status changes, internal notes, human public replies, AI
+    draft approve-publish and reject actions, and manual rerun actions.
+  - Surface AI analysis fields, relevant paths, pending drafts, and rerun controls
+    only to dev_ti and admin users.
+  out_of_scope:
+  - Worker-side Codex execution
+  - Additional admin web panels
+  - Drag-and-drop board interactions
+  dependencies:
+  - auth-requester
+  acceptance_criteria:
+  - id: AC-1
+    text: Dev/TI users can view all tickets, filter the board/list, inspect public
+      and internal threads separately, and manage assignment plus status transitions.
+  - id: AC-2
+    text: Public replies, internal notes, draft review, and manual reruns all reuse
+      shared ticket mutation logic so status history, updated_at, and ticket_views
+      stay consistent.
+  - id: AC-3
+    text: Requesters still cannot access any /ops surface, internal note, AI analysis
+      panel, or draft state after these routes are added.
+  - id: AC-4
+    text: Ops templates and handlers keep public and internal message lanes visibly
+      separate so internal content cannot be rendered into requester-visible blocks
+      by reuse mistakes.
+  deliverables:
+  - Ops routes, templates, HTMX partials, and filter handling
+  - Shared ops workflow services for assignment, status changes, replies, notes, draft
+    review, and reruns
+  - Role-gated AI analysis and draft panels
+  risks:
+  - Duplicated mutation logic between requester and ops flows would create inconsistent
+    state/history behavior.
+  - Mixed-thread templates are a high-risk leakage surface for internal content.
+  rollback:
+  - Disable /ops routes and revert UI/controller changes while preserving shared schema
+    and requester flows.
+  - Clean non-production draft/message fixtures if they interfere with repeated test
+    runs.
+- phase_id: ai-worker
+  title: AI Worker and Codex Orchestration
+  objective: Implement the queue-driven worker, read-only repo-aware Codex execution,
+    and safe publication logic required for Stage 1 triage.
+  status: planned
+  in_scope:
+  - Implement queue polling, oldest-pending selection, row locking, heartbeat updates,
+    and per-run artifact persistence under the workspace runs directory.
+  - Implement automatic-trigger and publication fingerprints, skip logic, stale-run
+    suppression, deferred requeue handling, and run failure handling.
+  - Implement classification updates, internal AI note publication, safe public clarification/reply/confirm
+    actions, and AI draft creation with draft supersession.
+  - Implement Codex command construction exactly to the PRD contract, including read-only
+    sandbox, no approval, disabled web search, output schema, output-last-message,
+    and final.json as the canonical result.
+  out_of_scope:
+  - Code modification or patch generation
+  - Web search or external integrations
+  - OCR or non-image attachments
+  dependencies:
+  - ops-workflow
+  acceptance_criteria:
+  - id: AC-1
+    text: The worker enforces one active run per ticket, uses the exact workspace/prompt/schema
+      contract, and is the only component that invokes Codex.
+  - id: AC-2
+    text: Successful non-superseded runs publish exactly one internal AI note before
+      any action-specific message or draft mutation and then update last_processed_hash.
+  - id: AC-3
+    text: Changed requester-visible input during a run causes the run to be marked
+      superseded with no internal note, no public publication, and no stale status
+      change.
+  - id: AC-4
+    text: Internal messages can influence AI analysis only through prompt context;
+      they are excluded from automatic-trigger and publication fingerprints, so new
+      internal notes require a manual rerun to affect AI output.
+  deliverables:
+  - Worker main loop, queue selection, ticket loader, triage logic, and Codex runner
+  - Shared fingerprinting and AI run lifecycle helpers
+  - Prompt/schema/workspace artifact generation and run diagnostics persistence
+  risks:
+  - Publication-order bugs can violate the exact-one-internal-note rule or leak stale
+    output.
+  - Queue/rerun races can create duplicate active runs without careful locking and
+    shared helper use.
+  rollback:
+  - Stop the worker process and leave the web app operational for manual triage.
+  - Revert worker code while preserving ai_runs history already written to the database.
+- phase_id: hardening-validation
+  title: Hardening, Observability, and Acceptance Validation
+  objective: Close operational gaps, add automated regression coverage, and prove
+    the delivered system against the Stage 1 acceptance criteria.
+  status: planned
+  in_scope:
+  - Add markdown rendering with bleach sanitization, structured JSON logs, health/readiness
+    endpoints, and readiness checks for database plus required workspace paths.
+  - Add automated tests covering sessions, permissions, uploads, status/history/view
+    invariants, worker queue logic, stale-run suppression, drafts, and workspace bootstrap
+    exactness.
+  - Validate bootstrap, web, and worker scripts plus the core acceptance criteria
+    end to end.
+  out_of_scope:
+  - New feature scope beyond the PRD
+  - Production deployment automation beyond local run/bootstrap scripts
+  dependencies:
+  - ai-worker
+  acceptance_criteria:
+  - id: AC-1
+    text: Health and readiness endpoints accurately reflect process liveness, database
+      reachability, and required workspace path availability.
+  - id: AC-2
+    text: Automated tests cover the main regression surfaces called out in the PRD
+      and this plan, including session model, multipart limits, queue races, and public
+      or internal separation.
+  - id: AC-3
+    text: The implementation can be validated end to end against the Stage 1 acceptance
+      criteria using the provided scripts and local environment variables.
+  deliverables:
+  - Logging, health, and readiness support
+  - Automated regression suite for core web and worker invariants
+  - Acceptance validation checklist embedded in repo docs or scripts
+  risks:
+  - Untested queue and visibility invariants are the most likely source of silent
+    regressions after initial delivery.
+  - Readiness checks that ignore missing mounts will fail late in worker execution
+    instead of at startup.
+  rollback:
+  - Revert hardening-only changes if they destabilize runtime behavior.
+  - Keep the previously working greenfield stack running with reduced observability
+    until fixes are ready.

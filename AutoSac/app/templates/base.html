@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}Stage 1 AI Triage{% endblock %}</title>
+    <link rel="stylesheet" href="/static/app.css">
+  </head>
+  <body>
+    <header class="site-header">
+      <div class="site-header__inner">
+        <a class="brand" href="{% if current_user and is_ops_user %}/ops{% elif current_user %}/app{% else %}/login{% endif %}">Stage 1 AI Triage</a>
+        {% if current_user %}
+        <nav class="site-nav">
+          {% if is_ops_user %}
+          <a href="/ops">Queue</a>
+          <a href="/ops/board">Board</a>
+          {% else %}
+          <a href="/app/tickets">My tickets</a>
+          <a href="/app/tickets/new">New ticket</a>
+          {% endif %}
+        </nav>
+        <div class="site-user">
+          <span>{{ current_user.display_name }}</span>
+          <form method="post" action="/logout">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button type="submit" class="button button--ghost">Log out</button>
+          </form>
+        </div>
+        {% endif %}
+      </div>
+    </header>
+    <main class="page">
+      {% if error %}
+      <div class="alert" role="alert">{{ error }}</div>
+      {% endif %}
+      {% block body %}{% endblock %}
+    </main>
+  </body>
+</html>
