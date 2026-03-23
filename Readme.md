@@ -109,6 +109,33 @@ This gives you a simple contract:
 **plan → implement → test**  
 with an audit gate between each stage and within each loop.
 
+## Installation (one command)
+
+From the Superloop repository root, run:
+
+```bash
+./install_superloop.sh
+```
+
+The installer will:
+
+- copy runtime files into `~/.local/share/superloop/app`
+- create a virtual environment at `~/.local/share/superloop/venv`
+- install Python dependencies from `requirements.txt`
+- create a launcher at `~/.local/bin/superloop`
+- install/update the Codex CLI skill at both:
+  - `${CODEX_HOME:-~/.codex}/skills/superloop`
+  - `${CODEX_AGENTS_SKILLS_DIR:-~/.agents/skills}/superloop`
+
+After install, run:
+
+```bash
+superloop --help
+```
+
+If `~/.local/bin` is not in your `PATH`, add it before running `superloop`.
+If Codex is already running, restart Codex after install so it reloads the updated `superloop` skill.
+
 ## Core workflow
 
 ### Plan
