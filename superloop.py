@@ -2464,13 +2464,137 @@ class PhaseControlDecision:
 def format_question(control: LoopControl) -> Optional[str]:
     if not control.question:
         return None
+    if control.question.best_supposition and not re.search(
+        r"(?mi)^\s*Best supposition\s*:",
+        control.question.text,
+    ):
+        return (
+            f"{control.question.text}\n"
+            f"Best supposition: {control.question.best_supposition}"
+        )
     return control.question.text
 
 
-def parse_phase_control(stdout: str, phase_name: str, pair_name: str) -> LoopControl:
+def build_loop_control_retry_feedback(pair_name: str, phase_name: str, error: str) -> str:
+    return (
+        "Loop-control parse feedback:\n"
+        f"The previous {pair_name} {phase_name} response could not be parsed: {error}\n"
+        "Retry this phase once now. Preserve the intended response, but fix the loop-control output so it follows the required contract exactly."
+    )
+
+
+def set_pending_session_note(session_file: Path, note: str) -> None:
+    session_state = load_session_state(session_file, "persistent")
+    session_state.pending_clarification_note = note
+    save_session_state(session_file, session_state)
+
+
+def retry_phase_after_parse_error(
+    *,
+    phase_name: str,
+    pair: str,
+    cycle_num: int,
+    attempt_num: int,
+    feedback_note: str,
+    session_file: Path,
+    run_id: str,
+    run_paths: Dict[str, Path],
+    paths: Dict[str, Path],
+    recorder: EventRecorder,
+    active_phase_selection: Optional[ResolvedPhaseSelection],
+    codex_command: CodexCommandConfig,
+    root: Path,
+    template_provenance: str,
+    template_text: str,
+    artifact_bundle: ArtifactBundle,
+    prior_phase_ids: Sequence[str],
+    prior_phase_keys: Sequence[str],
+) -> str:
+    warn(
+        f"{pair} {phase_name} emitted malformed or conflicting loop-control output; retrying once with parse feedback."
+    )
+    append_runtime_raw_log(
+        paths["raw_phase_log"],
+        run_id,
+        "loop_control_retry",
+        feedback_note,
+        pair=pair,
+        phase=phase_name,
+        cycle=cycle_num,
+        attempt=attempt_num,
+    )
+    append_runtime_raw_log(
+        run_paths["raw_phase_log"],
+        run_id,
+        "loop_control_retry",
+        feedback_note,
+        pair=pair,
+        phase=phase_name,
+        cycle=cycle_num,
+        attempt=attempt_num,
+    )
+    set_pending_session_note(session_file, feedback_note)
+    retry_stdout = run_codex_phase(
+        codex_command,
+        root,
+        template_provenance,
+        template_text,
+        phase_name,
+        pair,
+        cycle_num,
+        attempt_num,
+        run_id,
+        run_paths["request_file"],
+        session_file,
+        artifact_bundle,
+        run_paths["raw_phase_log"],
+        paths["raw_phase_log"],
+        run_paths["events_file"],
+        paths["task_dir"],
+        paths["decisions_file"],
+        active_phase_selection=active_phase_selection if pair in PHASED_PAIRS else None,
+        prior_phase_ids=prior_phase_ids,
+        prior_phase_keys=prior_phase_keys,
+    )
+    recorder.emit(
+        "phase_finished",
+        pair=pair,
+        phase=phase_name,
+        cycle=cycle_num,
+        attempt=attempt_num,
+        empty_output=(not retry_stdout.strip()),
+        phase_id=active_phase_selection.phase_ids[0] if active_phase_selection else None,
+    )
+    if not retry_stdout.strip():
+        recorder.emit(
+            "phase_output_empty",
+            pair=pair,
+            phase=phase_name,
+            cycle=cycle_num,
+            attempt=attempt_num,
+        )
+        warn(f"{pair} {phase_name} returned empty stdout (cycle {cycle_num}, attempt {attempt_num}) on retry.")
+    return retry_stdout
+
+
+def parse_phase_control(
+    stdout: str,
+    phase_name: str,
+    pair_name: str,
+    *,
+    retry_once: Optional[Callable[[str], str]] = None,
+) -> LoopControl:
     try:
         return parse_loop_control(stdout)
     except LoopControlParseError as exc:
+        if retry_once is not None:
+            retry_stdout = retry_once(build_loop_control_retry_feedback(pair_name, phase_name, str(exc)))
+            try:
+                return parse_loop_control(retry_stdout)
+            except LoopControlParseError as retry_exc:
+                fatal(
+                    f"[!] {pair_name} {phase_name} emitted malformed or conflicting loop-control output after one retry: {retry_exc}"
+                )
         fatal(
             f"[!] {pair_name} {phase_name} emitted malformed or conflicting loop-control output: {exc}"
         )
@@ -3035,7 +3159,35 @@ def execute_pair_cycles(
         if not producer_stdout.strip():
             recorder.emit("phase_output_empty", pair=pair, phase="producer", cycle=cycle_num, attempt=attempt_num)
             warn(f"{pair} producer returned empty stdout (cycle {cycle_num}, attempt {attempt_num}).")
-        producer_control = parse_phase_control(producer_stdout, "producer", pair)
+
+        def retry_producer_parse_once(feedback_note: str) -> str:
+            return retry_phase_after_parse_error(
+                phase_name="producer",
+                pair=pair,
+                cycle_num=cycle_num,
+                attempt_num=attempt_num,
+                feedback_note=feedback_note,
+                session_file=session_file,
+                run_id=run_id,
+                run_paths=run_paths,
+                paths=paths,
+                recorder=recorder,
+                active_phase_selection=active_phase_selection,
+                codex_command=codex_command,
+                root=root,
+                template_provenance=producer_template_provenance,
+                template_text=producer_template_text,
+                artifact_bundle=artifact_bundle,
+                prior_phase_ids=prior_phase_ids,
+                prior_phase_keys=prior_phase_keys,
+            )
+
+        producer_control = parse_phase_control(
+            producer_stdout,
+            "producer",
+            pair,
+            retry_once=retry_producer_parse_once,
+        )
         producer_decision = decide_producer_control(producer_control)
         producer_delta = (
             filter_volatile_task_run_paths(changed_paths_from_snapshot(root, producer_baseline), task_root_rel)
@@ -3130,7 +3282,35 @@ def execute_pair_cycles(
         if not verifier_stdout.strip():
             recorder.emit("phase_output_empty", pair=pair, phase="verifier", cycle=cycle_num, attempt=attempt_num)
             warn(f"{pair} verifier returned empty stdout (cycle {cycle_num}, attempt {attempt_num}).")
-        verifier_control = parse_phase_control(verifier_stdout, "verifier", pair)
+
+        def retry_verifier_parse_once(feedback_note: str) -> str:
+            return retry_phase_after_parse_error(
+                phase_name="verifier",
+                pair=pair,
+                cycle_num=cycle_num,
+                attempt_num=attempt_num,
+                feedback_note=feedback_note,
+                session_file=session_file,
+                run_id=run_id,
+                run_paths=run_paths,
+                paths=paths,
+                recorder=recorder,
+                active_phase_selection=active_phase_selection,
+                codex_command=codex_command,
+                root=root,
+                template_provenance=verifier_template_provenance,
+                template_text=verifier_template_text,
+                artifact_bundle=artifact_bundle,
+                prior_phase_ids=prior_phase_ids,
+                prior_phase_keys=prior_phase_keys,
+            )
+
+        verifier_control = parse_phase_control(
+            verifier_stdout,
+            "verifier",
+            pair,
+            retry_once=retry_verifier_parse_once,
+        )
         verifier_decision = decide_verifier_control(
             verifier_control,
             criteria_checked=criteria_all_checked(artifact_bundle.criteria_file),
