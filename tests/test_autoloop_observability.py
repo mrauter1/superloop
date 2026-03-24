@@ -128,6 +128,20 @@ def test_resolve_runtime_config_uses_builtins_when_no_config_and_yaml_missing(tm
     )
 
 
+def test_build_arg_parser_exposes_explicit_git_flag_pair():
+    parser = autoloop.build_arg_parser()
+    help_text = parser.format_help()
+
+    assert "[--git | --no-git]" in help_text
+    assert "--git" in help_text
+    assert "--no-git" in help_text
+    assert "--no-no-git" not in help_text
+    assert parser.parse_args([]).no_git is None
+    assert parser.parse_args(["--git"]).no_git is False
+    assert parser.parse_args(["--no-git"]).no_git is True
+    assert parser.parse_args(["--no-no-git"]).no_git is False
+
+
 def test_resolve_runtime_config_applies_global_local_and_cli_precedence(tmp_path: Path, monkeypatch):
     install_fake_yaml(monkeypatch)
     global_root = tmp_path / "global"
@@ -164,6 +178,17 @@ def test_resolve_runtime_config_applies_global_local_and_cli_precedence(tmp_path
     assert cli_resolved.provider == ProviderConfig(model="gpt-cli", model_effort="high")
     assert cli_resolved.runtime.max_iterations == 4
     assert cli_resolved.runtime.no_git is True
+
+    write_autoloop_config(
+        workspace_root / "autoloop.config",
+        {"provider": {"model": "gpt-local"}, "runtime": {"max_iterations": 3, "no_git": True}},
+    )
+
+    cli_git_resolved = resolve_runtime_config(
+        workspace_root,
+        argparse.Namespace(model=None, model_effort=None, no_git=False),
+    )
+    assert cli_git_resolved.runtime.no_git is False
 
 
 def test_resolve_runtime_config_rejects_invalid_runtime_values(tmp_path: Path, monkeypatch):
@@ -394,6 +419,57 @@ def test_main_resolves_provider_config_before_codex_command(tmp_path: Path, monk
 
     assert exit_code == 0
     assert captured == [ProviderConfig(model="gpt-local", model_effort="high")]
+
+
+def test_main_no_git_skips_git_setup_and_baseline_commit(tmp_path: Path, monkeypatch):
+    install_fake_yaml(monkeypatch)
+    observed: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        autoloop,
+        "check_dependencies",
+        lambda require_git=True: observed.setdefault("require_git", []).append(require_git),
+    )
+    monkeypatch.setattr(autoloop, "resolve_codex_exec_command", lambda _provider: fake_codex_command())
+    monkeypatch.setattr(
+        autoloop,
+        "execute_pair_cycles",
+        lambda **kwargs: observed.setdefault("use_git", kwargs["use_git"]) or ("complete", 0),
+    )
+    monkeypatch.setattr(autoloop, "has_git_repo", lambda *_args, **_kwargs: pytest.fail("has_git_repo should not run"))
+    monkeypatch.setattr(
+        autoloop,
+        "ensure_git_commit_ready",
+        lambda *_args, **_kwargs: pytest.fail("ensure_git_commit_ready should not run"),
+    )
+    monkeypatch.setattr(autoloop, "run_git", lambda *_args, **_kwargs: pytest.fail("run_git should not run"))
+    monkeypatch.setattr(
+        autoloop,
+        "commit_tracked_changes",
+        lambda *_args, **_kwargs: pytest.fail("commit_tracked_changes should not run"),
+    )
+    monkeypatch.setattr(
+        autoloop.sys,
+        "argv",
+        [
+            "autoloop.py",
+            "--workspace",
+            str(tmp_path),
+            "--pairs",
+            "plan",
+            "--task-id",
+            "no-git-main",
+            "--max-iterations",
+            "1",
+            "--no-git",
+        ],
+    )
+
+    exit_code = autoloop.main()
+
+    assert exit_code == 0
+    assert observed["use_git"] is False
+    assert observed["require_git"] == [False]
 
 
 def test_create_run_paths_creates_per_run_artifacts(tmp_path: Path):
