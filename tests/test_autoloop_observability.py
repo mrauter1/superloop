@@ -6,10 +6,10 @@ import subprocess
 from pathlib import Path
 
 import pytest
-import autoloop.autoloop as autoloop
+import autoloop.main as autoloop
 
 from autoloop.loop_control import LoopQuestion
-from autoloop.autoloop import (
+from autoloop.main import (
     CodexCommandConfig,
     ConfigError,
     EventRecorder,

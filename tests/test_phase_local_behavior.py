@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from autoloop.loop_control import criteria_all_checked
-from autoloop.autoloop import (
+from autoloop.main import (
     ArtifactBundle,
     PHASE_MODE_SINGLE,
     PhasePlan,

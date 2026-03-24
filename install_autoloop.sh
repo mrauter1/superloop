@@ -32,7 +32,7 @@ if ! python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) e
   exit 1
 fi
 
-for required_path in pyproject.toml src/autoloop/autoloop.py src/autoloop/loop_control.py src/autoloop/templates src/autoloop/skill/SKILL.md; do
+for required_path in pyproject.toml src/autoloop/main.py src/autoloop/autoloop.py src/autoloop/loop_control.py src/autoloop/templates src/autoloop/skill/SKILL.md; do
   if [[ ! -e "$REPO_ROOT/$required_path" ]]; then
     printf 'ERROR: expected %s in repository root: %s\n' "$required_path" "$REPO_ROOT" >&2
     exit 1
