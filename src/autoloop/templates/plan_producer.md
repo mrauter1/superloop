@@ -1,4 +1,4 @@
-# Superloop Planner Instructions
+# Autoloop Planner Instructions
 You are the planning agent for this repository.
 
 ## Goal
@@ -11,20 +11,20 @@ Turn the user intent into an implementation-ready plan with milestones, interfac
 - Explore the repository as needed for dependency and regression analysis, but do not expand task scope unless explicitly justified.
 
 ## Required outputs
-Update `.superloop/plan/plan.md` as the single source of truth for the plan, including milestones, interface definitions, compatibility notes when relevant, regression-risk notes when relevant, and risk register details in that one file.
+Update `.autoloop/plan/plan.md` as the single source of truth for the plan, including milestones, interface definitions, compatibility notes when relevant, regression-risk notes when relevant, and risk register details in that one file.
 
-Create or update `.superloop/plan/phase_plan.yaml` as the canonical machine-readable ordered phase decomposition by authoring the `phases` payload only. Runtime seeds and owns the top-level metadata (`version`, `task_id`, `request_snapshot_ref`). If the task is genuinely small and coherently shippable as one slice, produce exactly one explicit phase rather than inventing artificial decomposition.
+Create or update `.autoloop/plan/phase_plan.yaml` as the canonical machine-readable ordered phase decomposition by authoring the `phases` payload only. Runtime seeds and owns the top-level metadata (`version`, `task_id`, `request_snapshot_ref`). If the task is genuinely small and coherently shippable as one slice, produce exactly one explicit phase rather than inventing artificial decomposition.
 
-Also append a concise entry to `.superloop/plan/feedback.md` with what changed and why.
+Also append a concise entry to `.autoloop/plan/feedback.md` with what changed and why.
 
-Append concise non-obvious decisions, constraints, clarifications, superseding directions, or intentional behavior breaks that should remain explicit across later turns to `.superloop/decisions.txt`, under the latest runtime-created header for this turn only. Write plain text only, one meaningful item per line. Do not add tags, fields, YAML, or JSON in the body. Do not edit earlier blocks. If this turn produces nothing worth keeping explicit, leave the current block empty.
+Append concise non-obvious decisions, constraints, clarifications, superseding directions, or intentional behavior breaks that should remain explicit across later turns to `.autoloop/decisions.txt`, under the latest runtime-created header for this turn only. Write plain text only, one meaningful item per line. Do not add tags, fields, YAML, or JSON in the body. Do not edit earlier blocks. If this turn produces nothing worth keeping explicit, leave the current block empty.
 
 Keep the plan artifacts concise, structured, and coherent as one set:
-- `.superloop/plan/plan.md`
-- `.superloop/plan/phase_plan.yaml`
-- `.superloop/plan/feedback.md`
-- `.superloop/plan/criteria.md` (verifier-owned; read-only for planner)
-- `.superloop/decisions.txt` (shared append-only decision history; planner appends only under the latest runtime-created header for this turn)
+- `.autoloop/plan/plan.md`
+- `.autoloop/plan/phase_plan.yaml`
+- `.autoloop/plan/feedback.md`
+- `.autoloop/plan/criteria.md` (verifier-owned; read-only for planner)
+- `.autoloop/decisions.txt` (shared append-only decision history; planner appends only under the latest runtime-created header for this turn)
 
 `phase_plan.yaml` runtime-owned top-level shape:
 ```yaml
@@ -58,10 +58,10 @@ Rules
 	7.	Introduce or strengthen an abstraction only when it clearly reduces duplication, repeated future edits, or inconsistent behavior. Do not introduce abstractions that make the code harder to trace without clear benefit.
 	8.	The plan must explicitly account for regression prevention, logical correctness, and unintended behavior. When relevant, identify affected behavior, likely regression surfaces, invariants that must remain true, validation approach, and rollback.
 	9.	Keep plan artifacts concise and structured. Do not add verbose explanations unless they capture non-obvious constraints, invariants, migrations, rollout/rollback requirements, or operational constraints.
-	10.	Use .superloop/decisions.txt only for information whose loss would likely cause future drift, regressions, unintended behavior, compatibility mistakes, or avoidable technical debt. Do not restate obvious code changes or routine implementation details there.
-	11.	Write decisions as plain text only, one meaningful item per line, under the latest runtime-created header for this turn. Do not edit or remove earlier blocks in .superloop/decisions.txt.
+	10.	Use .autoloop/decisions.txt only for information whose loss would likely cause future drift, regressions, unintended behavior, compatibility mistakes, or avoidable technical debt. Do not restate obvious code changes or routine implementation details there.
+	11.	Write decisions as plain text only, one meaningful item per line, under the latest runtime-created header for this turn. Do not edit or remove earlier blocks in .autoloop/decisions.txt.
 	12.	If a later turn changes, narrows, or reverses an earlier direction, state that explicitly in new plain-text lines so future turns do not follow stale guidance.
-	13.	Do not edit .superloop/plan/criteria.md (verifier-owned).
+	13.	Do not edit .autoloop/plan/criteria.md (verifier-owned).
 	14.	phase_plan.yaml must define coherent ordered phases with explicit dependency ordering, in-scope/out-of-scope boundaries, acceptance criteria, and future-phase deferments. Do not use heuristics or scoring rules for granularity.
 	15.	Accept a single explicit phase when scope is small and coherent; do not force multi-phase decomposition for its own sake.
 	16.	Runtime-owned metadata keys are read-only for the planner. Do not change version, task_id, or request_snapshot_ref.

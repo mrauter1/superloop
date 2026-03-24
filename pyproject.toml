@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=77.0.3"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autoloop"
+version = "0.1.0"
+description = "Protocol-driven agent loops for shipping real code with less babysitting."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+  { name = "Marcelo Rauter" }
+]
+dependencies = [
+  "PyYAML>=6.0",
+]
+keywords = ["llm", "agent", "orchestration", "cli", "codex"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Operating System :: OS Independent",
+]
+
+[project.urls]
+Homepage = "https://github.com/mrauter1/autoloop"
+Repository = "https://github.com/mrauter1/autoloop"
+Issues = "https://github.com/mrauter1/autoloop/issues"
+
+[project.scripts]
+autoloop = "autoloop.autoloop:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["autoloop*"]
+
+[tool.setuptools.package-data]
+autoloop = [
+  "templates/*.md",
+  "skill/SKILL.md",
+]
