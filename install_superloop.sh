@@ -28,6 +28,10 @@ require_cmd() {
 }
 
 require_cmd python3
+if ! python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 7) else 1)' >/dev/null 2>&1; then
+  printf 'ERROR: python3 version must be 3.7 or higher.\n' >&2
+  exit 1
+fi
 
 for required_path in superloop.py loop_control.py templates "skills/$SKILL_NAME"; do
   if [[ ! -e "$REPO_ROOT/$required_path" ]]; then
@@ -68,8 +72,14 @@ fi
 
 VENV_PYTHON="$VENV_DIR/bin/python"
 
-log "Upgrading pip tooling"
-"$VENV_PYTHON" -m pip install --upgrade pip setuptools wheel
+if [[ "${SUPERLOOP_SKIP_PIP_UPGRADE:-0}" == "1" ]]; then
+  log "Skipping pip tooling upgrade because SUPERLOOP_SKIP_PIP_UPGRADE=1"
+else
+  log "Upgrading pip tooling (best-effort)"
+  if ! "$VENV_PYTHON" -m pip install --upgrade pip setuptools wheel; then
+    log "WARNING: pip tooling upgrade failed; continuing install."
+  fi
+fi
 
 if [[ -f "$APP_DIR/requirements.txt" ]]; then
   log "Installing Python dependencies from requirements.txt"

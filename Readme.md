@@ -135,6 +135,7 @@ superloop --help
 
 If `~/.local/bin` is not in your `PATH`, add it before running `superloop`.
 If Codex is already running, restart Codex after install so it reloads the updated `superloop` skill.
+The installer requires `python3 >= 3.7`. Set `SUPERLOOP_SKIP_PIP_UPGRADE=1` to skip best-effort pip/setuptools/wheel upgrades (useful in restricted-network environments).
 
 ## Core workflow
 
