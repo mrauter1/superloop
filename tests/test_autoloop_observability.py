@@ -10,7 +10,9 @@ import autoloop.main as autoloop
 
 from autoloop.loop_control import LoopQuestion
 from autoloop.main import (
+    ClaudeProviderConfig,
     CodexCommandConfig,
+    CodexProviderConfig,
     ConfigError,
     EventRecorder,
     ProviderConfig,
@@ -26,6 +28,7 @@ from autoloop.main import (
     execute_pair_cycles,
     latest_run_id,
     latest_task_id,
+    load_session_state,
     load_resume_checkpoint,
     load_phase_plan,
     open_existing_run_paths,
@@ -117,7 +120,11 @@ def test_resolve_runtime_config_uses_builtins_when_no_config_and_yaml_missing(tm
         argparse.Namespace(model=None, model_effort=None),
     )
 
-    assert resolved.provider == ProviderConfig(model="gpt-5.4", model_effort=None)
+    assert resolved.provider == ProviderConfig(
+        name="codex",
+        codex=CodexProviderConfig(model="gpt-5.4", model_effort=None),
+        claude=ClaudeProviderConfig(),
+    )
     assert resolved.runtime == RuntimeConfig(
         pairs="plan,implement,test",
         max_iterations=15,
@@ -133,8 +140,11 @@ def test_build_arg_parser_exposes_explicit_git_flag_pair():
     help_text = parser.format_help()
 
     assert "[--git | --no-git]" in help_text
+    assert "multi-provider repository orchestration" in help_text
     assert "--git" in help_text
     assert "--no-git" in help_text
+    assert "active provider" in help_text
+    assert "provider.name resolves to codex" in help_text
     assert "--no-no-git" not in help_text
     assert parser.parse_args([]).no_git is None
     assert parser.parse_args(["--git"]).no_git is False
@@ -166,7 +176,11 @@ def test_resolve_runtime_config_applies_global_local_and_cli_precedence(tmp_path
         workspace_root,
         argparse.Namespace(model=None, model_effort=None),
     )
-    assert resolved.provider == ProviderConfig(model="gpt-local", model_effort="medium")
+    assert resolved.provider == ProviderConfig(
+        name="codex",
+        codex=CodexProviderConfig(model="gpt-local", model_effort="medium"),
+        claude=ClaudeProviderConfig(),
+    )
     assert resolved.runtime.max_iterations == 3
     assert resolved.runtime.phase_mode == "up-to"
     assert resolved.runtime.no_git is False
@@ -175,7 +189,11 @@ def test_resolve_runtime_config_applies_global_local_and_cli_precedence(tmp_path
         workspace_root,
         argparse.Namespace(model="gpt-cli", model_effort="high", max_iterations=4, no_git=True),
     )
-    assert cli_resolved.provider == ProviderConfig(model="gpt-cli", model_effort="high")
+    assert cli_resolved.provider == ProviderConfig(
+        name="codex",
+        codex=CodexProviderConfig(model="gpt-cli", model_effort="high"),
+        claude=ClaudeProviderConfig(),
+    )
     assert cli_resolved.runtime.max_iterations == 4
     assert cli_resolved.runtime.no_git is True
 
@@ -189,6 +207,72 @@ def test_resolve_runtime_config_applies_global_local_and_cli_precedence(tmp_path
         argparse.Namespace(model=None, model_effort=None, no_git=False),
     )
     assert cli_git_resolved.runtime.no_git is False
+
+
+def test_resolve_runtime_config_supports_explicit_nested_provider_selection(tmp_path: Path, monkeypatch):
+    install_fake_yaml(monkeypatch)
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    monkeypatch.setattr(autoloop, "user_config_dir", lambda: tmp_path / "global")
+    write_autoloop_config(
+        workspace_root / "autoloop.yaml",
+        {
+            "provider": {
+                "name": "claude",
+                "codex": {"model": "gpt-fallback"},
+                "claude": {
+                    "model": "sonnet",
+                    "effort": "high",
+                    "permission_strategy": "allow_core_tools",
+                },
+            }
+        },
+    )
+
+    resolved = resolve_runtime_config(
+        workspace_root,
+        argparse.Namespace(model=None, model_effort=None),
+    )
+
+    assert resolved.provider == ProviderConfig(
+        name="claude",
+        codex=CodexProviderConfig(model="gpt-fallback", model_effort=None),
+        claude=ClaudeProviderConfig(
+            model="sonnet",
+            effort="high",
+            permission_strategy="allow_core_tools",
+        ),
+    )
+
+
+def test_resolve_provider_runtime_supports_claude():
+    runtime = autoloop.resolve_provider_runtime(
+        ProviderConfig(
+            name="claude",
+            codex=CodexProviderConfig(model="gpt-5.4", model_effort=None),
+            claude=ClaudeProviderConfig(model="sonnet", effort="high", permission_strategy="inherit"),
+        )
+    )
+
+    assert runtime.name == "claude"
+    assert runtime.claude == ClaudeProviderConfig(model="sonnet", effort="high", permission_strategy="inherit")
+    assert runtime.codex_command is None
+
+
+def test_check_dependencies_runs_claude_preflight(monkeypatch):
+    calls: list[list[str]] = []
+
+    monkeypatch.setattr(autoloop.shutil, "which", lambda _name: "/usr/bin/fake")
+
+    def fake_run(args, **kwargs):
+        calls.append(list(args))
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(autoloop.subprocess, "run", fake_run)
+
+    autoloop.check_dependencies(provider_name="claude", require_git=False)
+
+    assert calls == [["claude", "--version"], ["claude", "auth", "status"]]
 
 
 def test_resolve_runtime_config_rejects_invalid_runtime_values(tmp_path: Path, monkeypatch):
@@ -284,6 +368,33 @@ def test_resolve_runtime_config_rejects_non_string_runtime_key(tmp_path: Path, m
         resolve_runtime_config(workspace_root, argparse.Namespace(model=None, model_effort=None))
 
 
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        ({"provider": {1: "x", "bad": "y"}}, "unsupported provider keys: 1, bad"),
+        ({"provider": {"codex": {1: "x", "bad": "y"}}}, "unsupported provider.codex keys: 1, bad"),
+        ({"provider": {"claude": {1: "x", "bad": "y"}}}, "unsupported provider.claude keys: 1, bad"),
+        ({"provider": {"claude": {"bad": "y", 1: "x"}}}, "unsupported provider.claude keys: 1, bad"),
+        ({"runtime": {1: "x", "bad": "y"}}, "unsupported runtime keys: 1, bad"),
+        ({"provider": {"model": "gpt-test"}, 1: "x", "bad": "y"}, "unsupported top-level keys: 1, bad"),
+    ],
+)
+def test_resolve_runtime_config_reports_mixed_type_unknown_keys_as_config_errors(
+    tmp_path: Path,
+    monkeypatch,
+    payload: dict[object, object],
+    message: str,
+):
+    install_fake_yaml(monkeypatch)
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    monkeypatch.setattr(autoloop, "user_config_dir", lambda: tmp_path / "global")
+    write_autoloop_config(workspace_root / "autoloop.yaml", payload)
+
+    with pytest.raises(ConfigError, match=message):
+        resolve_runtime_config(workspace_root, argparse.Namespace(model=None, model_effort=None))
+
+
 def test_resolve_runtime_config_rejects_malformed_yaml(tmp_path: Path, monkeypatch):
     import pytest
 
@@ -320,7 +431,7 @@ def test_resolve_codex_exec_command_includes_model_effort_when_supported(monkeyp
 
     monkeypatch.setattr(autoloop.subprocess, "run", fake_run)
 
-    command = resolve_codex_exec_command(ProviderConfig(model="gpt-test", model_effort="high"))
+    command = resolve_codex_exec_command(CodexProviderConfig(model="gpt-test", model_effort="high"))
 
     assert help_calls == [
         ["codex", "exec", "--help"],
@@ -341,7 +452,7 @@ def test_resolve_codex_exec_command_omits_model_effort_when_unset(monkeypatch):
 
     monkeypatch.setattr(autoloop.subprocess, "run", fake_run)
 
-    command = resolve_codex_exec_command(ProviderConfig(model="gpt-test"))
+    command = resolve_codex_exec_command(CodexProviderConfig(model="gpt-test"))
 
     assert "--model-effort" not in command.start_command
     assert "--model-effort" not in command.resume_command
@@ -360,7 +471,7 @@ def test_resolve_codex_exec_command_rejects_unsupported_model_effort(monkeypatch
     monkeypatch.setattr(autoloop.subprocess, "run", fake_run)
 
     with pytest.raises(SystemExit):
-        resolve_codex_exec_command(ProviderConfig(model="gpt-test", model_effort="high"))
+        resolve_codex_exec_command(CodexProviderConfig(model="gpt-test", model_effort="high"))
 
 
 def test_main_resolves_provider_config_before_codex_command(tmp_path: Path, monkeypatch):
@@ -379,7 +490,7 @@ def test_main_resolves_provider_config_before_codex_command(tmp_path: Path, monk
         {"provider": {"model": "gpt-local"}},
     )
 
-    captured: list[ProviderConfig] = []
+    captured: list[CodexProviderConfig] = []
     control = autoloop.LoopControl(
         question=None,
         promise=autoloop.PROMISE_COMPLETE,
@@ -418,7 +529,7 @@ def test_main_resolves_provider_config_before_codex_command(tmp_path: Path, monk
     exit_code = autoloop.main()
 
     assert exit_code == 0
-    assert captured == [ProviderConfig(model="gpt-local", model_effort="high")]
+    assert captured == [CodexProviderConfig(model="gpt-local", model_effort="high")]
 
 
 def test_main_no_git_skips_git_setup_and_baseline_commit(tmp_path: Path, monkeypatch):
@@ -484,7 +595,66 @@ def test_create_run_paths_creates_per_run_artifacts(tmp_path: Path):
     assert run_paths["request_file"].read_text(encoding="utf-8").strip() == "Implement feature X"
     session_payload = json.loads(run_paths["plan_session_file"].read_text(encoding="utf-8"))
     assert session_payload["mode"] == "persistent"
+    assert session_payload["provider"] == "codex"
+    assert session_payload["session_id"] is None
     assert session_payload["thread_id"] is None
+    assert session_payload["provider_metadata"] == {}
+
+
+def test_load_session_state_migrates_legacy_thread_id_to_provider_neutral_fields(tmp_path: Path):
+    session_file = tmp_path / "session.json"
+    session_file.write_text(
+        json.dumps(
+            {
+                "mode": "persistent",
+                "thread_id": "thread-123",
+                "pending_clarification_note": "Apply this",
+                "created_at": "2026-03-20T00:00:00Z",
+                "last_used_at": "2026-03-20T00:10:00Z",
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    session_state = load_session_state(session_file, "persistent")
+
+    assert session_state.provider == "codex"
+    assert session_state.session_id == "thread-123"
+    assert session_state.thread_id == "thread-123"
+
+
+def test_load_session_state_treats_legacy_payload_without_provider_as_codex_even_without_thread_id(tmp_path: Path):
+    session_file = tmp_path / "session.json"
+    session_file.write_text(
+        json.dumps(
+            {
+                "mode": "persistent",
+                "thread_id": None,
+                "pending_clarification_note": None,
+                "created_at": "2026-03-20T00:00:00Z",
+                "last_used_at": "2026-03-20T00:10:00Z",
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    session_state = load_session_state(session_file, "persistent", default_provider="claude")
+
+    assert session_state.provider == "codex"
+    assert session_state.session_id is None
+    assert session_state.thread_id is None
+
+
+def test_load_session_state_uses_default_provider_when_session_file_is_missing(tmp_path: Path):
+    session_state = load_session_state(tmp_path / "missing-session.json", "persistent", default_provider="claude")
+
+    assert session_state.provider == "claude"
+    assert session_state.session_id is None
+    assert session_state.thread_id is None
 
 
 def test_append_runtime_notice_writes_only_task_and_run_raw_logs(tmp_path: Path):
@@ -1373,6 +1543,445 @@ def test_run_codex_phase_logs_shared_template_provenance(tmp_path: Path, monkeyp
     assert f"template={template_provenance}" in run_raw_phase_log.read_text(encoding="utf-8")
     assert "prompt.md" not in task_raw_phase_log.read_text(encoding="utf-8")
     assert "prompt.md" not in run_raw_phase_log.read_text(encoding="utf-8")
+
+
+def test_run_provider_phase_uses_claude_append_system_prompt_file_and_persists_metadata(tmp_path: Path, monkeypatch):
+    request_file = tmp_path / "request.md"
+    request_file.write_text("Implement feature X\n", encoding="utf-8")
+    task_raw_phase_log = tmp_path / "task_raw_phase_log.md"
+    task_raw_phase_log.write_text("# task raw\n", encoding="utf-8")
+    run_raw_phase_log = tmp_path / "run_raw_phase_log.md"
+    run_raw_phase_log.write_text("# run raw\n", encoding="utf-8")
+    decisions_file = tmp_path / "decisions.txt"
+    decisions_file.write_text("", encoding="utf-8")
+    events_file = tmp_path / "events.jsonl"
+    events_file.write_text("", encoding="utf-8")
+    session_file = tmp_path / "session.json"
+    artifact_bundle = autoloop.ArtifactBundle(
+        pair="plan",
+        scope="task-global",
+        artifact_dir=tmp_path,
+        criteria_file=tmp_path / "criteria.md",
+        feedback_file=tmp_path / "feedback.md",
+        artifact_files={},
+        allowed_verifier_prefixes=(),
+    )
+
+    observed: dict[str, object] = {}
+
+    def fake_run(args, **kwargs):
+        command = list(args)
+        observed["command"] = command
+        observed["prompt"] = command[command.index("-p") + 1]
+        prompt_file = Path(command[command.index("--append-system-prompt-file") + 1])
+        observed["prompt_file"] = prompt_file
+        observed["prompt_file_text"] = prompt_file.read_text(encoding="utf-8")
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "result": '<loop-control>{"schema":"docloop.loop_control/v1","kind":"continue","promise":"complete"}</loop-control>',
+                    "session_id": "claude-session-1",
+                    "cost_usd": 0.25,
+                }
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(autoloop.subprocess, "run", fake_run)
+
+    stdout = autoloop.run_provider_phase(
+        autoloop.ProviderRuntime(name="claude", claude=ClaudeProviderConfig()),
+        tmp_path,
+        "templates/plan_producer.md",
+        "Prompt body\n",
+        "producer",
+        "plan",
+        1,
+        1,
+        "run-1",
+        request_file,
+        session_file,
+        artifact_bundle,
+        run_raw_phase_log,
+        task_raw_phase_log,
+        events_file,
+        tmp_path,
+        decisions_file,
+    )
+
+    assert stdout.startswith("<loop-control>")
+    command = observed["command"]
+    assert command[:5] == ["claude", "-p", observed["prompt"], "--output-format", "json"]
+    assert "--append-system-prompt-file" in command
+    assert "--resume" not in command
+    for flag in (
+        "--bare",
+        "--system-prompt",
+        "--system-prompt-file",
+        "--setting-sources",
+        "--strict-mcp-config",
+        "--tools",
+        "--disallowedTools",
+        "--disable-slash-commands",
+        "--max-turns",
+    ):
+        assert flag not in command
+    assert "REPOSITORY ROOT:" in observed["prompt"]
+    assert "Prompt body" not in observed["prompt"]
+    assert "Do not use AskUserQuestion" in observed["prompt_file_text"]
+    assert "Prompt body" in observed["prompt_file_text"]
+    assert not observed["prompt_file"].exists()
+
+    session_payload = json.loads(session_file.read_text(encoding="utf-8"))
+    assert session_payload["provider"] == "claude"
+    assert session_payload["session_id"] == "claude-session-1"
+    assert session_payload["thread_id"] is None
+    assert session_payload["provider_metadata"] == {"session_id": "claude-session-1", "cost_usd": 0.25}
+    assert session_payload["model_override"] is None
+    assert session_payload["effort_override"] is None
+
+
+def test_run_provider_phase_persists_explicit_claude_model_and_effort_overrides(tmp_path: Path, monkeypatch):
+    request_file = tmp_path / "request.md"
+    request_file.write_text("Implement feature X\n", encoding="utf-8")
+    task_raw_phase_log = tmp_path / "task_raw_phase_log.md"
+    task_raw_phase_log.write_text("# task raw\n", encoding="utf-8")
+    run_raw_phase_log = tmp_path / "run_raw_phase_log.md"
+    run_raw_phase_log.write_text("# run raw\n", encoding="utf-8")
+    decisions_file = tmp_path / "decisions.txt"
+    decisions_file.write_text("", encoding="utf-8")
+    events_file = tmp_path / "events.jsonl"
+    events_file.write_text("", encoding="utf-8")
+    session_file = tmp_path / "session.json"
+    artifact_bundle = autoloop.ArtifactBundle(
+        pair="plan",
+        scope="task-global",
+        artifact_dir=tmp_path,
+        criteria_file=tmp_path / "criteria.md",
+        feedback_file=tmp_path / "feedback.md",
+        artifact_files={},
+        allowed_verifier_prefixes=(),
+    )
+
+    def fake_run(args, **kwargs):
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=0,
+            stdout=json.dumps({"result": "assistant output", "session_id": "claude-session-2", "cost_usd": 0.5}),
+            stderr="",
+        )
+
+    monkeypatch.setattr(autoloop.subprocess, "run", fake_run)
+
+    autoloop.run_provider_phase(
+        autoloop.ProviderRuntime(
+            name="claude",
+            claude=ClaudeProviderConfig(model="sonnet", effort="high", permission_strategy="inherit"),
+        ),
+        tmp_path,
+        "templates/plan_producer.md",
+        "Prompt body\n",
+        "producer",
+        "plan",
+        1,
+        1,
+        "run-1",
+        request_file,
+        session_file,
+        artifact_bundle,
+        run_raw_phase_log,
+        task_raw_phase_log,
+        events_file,
+        tmp_path,
+        decisions_file,
+    )
+
+    session_payload = json.loads(session_file.read_text(encoding="utf-8"))
+    assert session_payload["model_override"] == "sonnet"
+    assert session_payload["effort_override"] == "high"
+
+
+def test_execute_provider_turn_builds_claude_resume_command_with_explicit_overrides(tmp_path: Path, monkeypatch):
+    observed: dict[str, object] = {}
+
+    def fake_run(args, **kwargs):
+        observed["command"] = list(args)
+        prompt_file = Path(args[args.index("--append-system-prompt-file") + 1])
+        observed["prompt_file_text"] = prompt_file.read_text(encoding="utf-8")
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=0,
+            stdout=json.dumps({"result": "assistant output", "session_id": "claude-session-1"}),
+            stderr="",
+        )
+
+    monkeypatch.setattr(autoloop.subprocess, "run", fake_run)
+
+    result = autoloop.execute_provider_turn(
+        autoloop.ProviderRuntime(
+            name="claude",
+            claude=ClaudeProviderConfig(model="sonnet", effort="high", permission_strategy="allow_core_tools"),
+        ),
+        cwd=tmp_path,
+        prompt="Prompt text",
+        session_id="claude-session-1",
+        append_system_prompt_text="System prompt\n",
+    )
+
+    assert result.stdout == "assistant output"
+    assert result.session_id == "claude-session-1"
+    command = observed["command"]
+    assert "--resume" in command
+    assert command[command.index("--resume") + 1] == "claude-session-1"
+    assert "--model" in command
+    assert command[command.index("--model") + 1] == "sonnet"
+    assert "--effort" in command
+    assert command[command.index("--effort") + 1] == "high"
+    assert "--allowedTools" in command
+    assert command[command.index("--allowedTools") + 1] == "Read,Write,Edit,Glob,Grep,Bash"
+    assert "--dangerously-skip-permissions" not in command
+    assert observed["prompt_file_text"] == "System prompt\n"
+
+
+def test_execute_provider_turn_rejects_malformed_claude_json(tmp_path: Path, monkeypatch):
+    observed: dict[str, object] = {}
+
+    def fake_run(args, **kwargs):
+        observed["command"] = list(args)
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="not-json", stderr="warn")
+
+    monkeypatch.setattr(autoloop.subprocess, "run", fake_run)
+
+    with pytest.raises(autoloop.ProviderExecutionError, match="Claude CLI returned invalid JSON output"):
+        autoloop.execute_provider_turn(
+            autoloop.ProviderRuntime(name="claude", claude=ClaudeProviderConfig(permission_strategy="bypass")),
+            cwd=tmp_path,
+            prompt="Prompt text",
+            session_id=None,
+            append_system_prompt_text="System prompt\n",
+        )
+    assert "--dangerously-skip-permissions" in observed["command"]
+
+
+def test_execute_provider_turn_surfaces_codex_failures_for_caller_logging(tmp_path: Path, monkeypatch):
+    def fake_run(args, **kwargs):
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=7,
+            stdout='{"type":"error","message":"bad prompt"}\n',
+            stderr="codex failed",
+        )
+
+    monkeypatch.setattr(autoloop.subprocess, "run", fake_run)
+
+    with pytest.raises(autoloop.ProviderExecutionError, match="Codex CLI failed with exit code 7"):
+        autoloop.execute_provider_turn(
+            autoloop.ProviderRuntime(
+                name="codex",
+                codex_command=CodexCommandConfig(
+                    start_command=["codex", "exec", "--json", "-"],
+                    resume_command=["codex", "exec", "resume", "--json"],
+                ),
+            ),
+            cwd=tmp_path,
+            prompt="Prompt text",
+            session_id=None,
+        )
+
+
+def test_auto_answer_question_logs_provider_failures_before_fatal(tmp_path: Path, monkeypatch):
+    request_file = tmp_path / "request.md"
+    request_file.write_text("Implement feature X\n", encoding="utf-8")
+    task_raw_phase_log = tmp_path / "task_raw_phase_log.md"
+    task_raw_phase_log.write_text("# task raw\n", encoding="utf-8")
+    run_raw_phase_log = tmp_path / "run_raw_phase_log.md"
+    run_raw_phase_log.write_text("# run raw\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        autoloop,
+        "execute_provider_turn",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            autoloop.ProviderExecutionError(
+                provider_name="claude",
+                message="[!] Claude CLI returned invalid JSON output: Claude CLI returned malformed JSON.",
+                raw_output="STDOUT:\nnot-json\n\nSTDERR:\nwarn",
+                command_mode="start",
+            )
+        ),
+    )
+    monkeypatch.setattr(autoloop, "fatal", lambda message, exit_code=1: (_ for _ in ()).throw(RuntimeError(message)))
+
+    with pytest.raises(RuntimeError, match="Claude CLI returned invalid JSON output"):
+        autoloop.auto_answer_question(
+            autoloop.ProviderRuntime(name="claude", claude=ClaudeProviderConfig()),
+            tmp_path,
+            request_file,
+            run_raw_phase_log,
+            task_raw_phase_log,
+            "run-1",
+            "Need confirmation?",
+            pair="implement",
+            phase="producer",
+            cycle=1,
+            attempt=1,
+        )
+
+    task_raw_text = task_raw_phase_log.read_text(encoding="utf-8")
+    run_raw_text = run_raw_phase_log.read_text(encoding="utf-8")
+    assert "entry=provider_failure" in task_raw_text
+    assert "context=auto_answer" in task_raw_text
+    assert "STDOUT:\nnot-json" in task_raw_text
+    assert "entry=provider_failure" in run_raw_text
+
+
+def test_execute_pair_cycles_auto_answers_claude_questions_with_phase_context(tmp_path: Path, monkeypatch):
+    paths = ensure_workspace(tmp_path, "task-1", "Implement feature X", "replace")
+    run_paths = create_run_paths(paths["runs_dir"], "run-1", "Implement feature X")
+    recorder = EventRecorder(run_id="run-1", events_file=run_paths["events_file"])
+    bundle = autoloop.ArtifactBundle(
+        pair="plan",
+        scope="task-global",
+        artifact_dir=tmp_path,
+        criteria_file=tmp_path / "criteria.md",
+        feedback_file=tmp_path / "feedback.md",
+        artifact_files={},
+        allowed_verifier_prefixes=(),
+    )
+
+    question_stdout = (
+        '<loop-control>\n'
+        '{"schema":"docloop.loop_control/v1","kind":"question","question":"Need confirmation?","best_supposition":"proceed safely"}\n'
+        '</loop-control>'
+    )
+    captured: dict[str, object] = {}
+
+    def fake_run_selected_phase(*args, **kwargs):
+        phase_name = args[4]
+        assert phase_name == "producer"
+        return question_stdout
+
+    class StopAfterClarification(RuntimeError):
+        pass
+
+    original_append_clarification = autoloop.append_clarification
+
+    def stop_after_clarification(*args, **kwargs):
+        original_append_clarification(*args, **kwargs)
+        raise StopAfterClarification
+
+    def fake_auto_answer_question(provider_runtime, root, request_file, run_raw_phase_log, task_raw_phase_log, run_id, question, **kwargs):
+        captured["provider"] = provider_runtime.name
+        captured["root"] = root
+        captured["request_file"] = request_file
+        captured["run_raw_phase_log"] = run_raw_phase_log
+        captured["task_raw_phase_log"] = task_raw_phase_log
+        captured["run_id"] = run_id
+        captured["question"] = question
+        captured.update(kwargs)
+        return "Auto answer"
+
+    monkeypatch.setattr(autoloop, "commit_tracked_changes", lambda *args, **kwargs: False)
+    monkeypatch.setattr(autoloop, "run_selected_phase", fake_run_selected_phase)
+    monkeypatch.setattr(autoloop, "auto_answer_question", fake_auto_answer_question)
+    monkeypatch.setattr(autoloop, "append_clarification", stop_after_clarification)
+
+    with pytest.raises(StopAfterClarification):
+        execute_pair_cycles(
+            pair_cfg=PairConfig(name="plan", enabled=True, max_iterations=1),
+            pair="plan",
+            artifact_bundle=bundle,
+            session_file=run_paths["plan_session_file"],
+            root=tmp_path,
+            provider_runtime=autoloop.ProviderRuntime(name="claude", claude=ClaudeProviderConfig()),
+            run_id="run-1",
+            run_paths=run_paths,
+            paths=paths,
+            recorder=recorder,
+            task_root_rel=str(paths["task_root_rel"]),
+            use_git=False,
+            active_phase_selection=None,
+            enabled_pairs=["plan"],
+            args=argparse.Namespace(full_auto_answers=True),
+            resume_checkpoint=None,
+            use_resume_state=False,
+        )
+
+    assert captured == {
+        "provider": "claude",
+        "root": tmp_path,
+        "request_file": run_paths["request_file"],
+        "run_raw_phase_log": run_paths["raw_phase_log"],
+        "task_raw_phase_log": paths["raw_phase_log"],
+        "run_id": "run-1",
+        "question": "Need confirmation?\nBest supposition: proceed safely",
+        "pair": "plan",
+        "phase": "producer",
+        "cycle": 1,
+        "attempt": 1,
+    }
+    decisions_text = paths["decisions_file"].read_text(encoding="utf-8")
+    assert 'source="auto"' in decisions_text
+    assert "Auto answer" in decisions_text
+
+
+def test_run_provider_phase_logs_claude_provider_failures_before_fatal(tmp_path: Path, monkeypatch):
+    request_file = tmp_path / "request.md"
+    request_file.write_text("Implement feature X\n", encoding="utf-8")
+    task_raw_phase_log = tmp_path / "task_raw_phase_log.md"
+    task_raw_phase_log.write_text("# task raw\n", encoding="utf-8")
+    run_raw_phase_log = tmp_path / "run_raw_phase_log.md"
+    run_raw_phase_log.write_text("# run raw\n", encoding="utf-8")
+    decisions_file = tmp_path / "decisions.txt"
+    decisions_file.write_text("", encoding="utf-8")
+    events_file = tmp_path / "events.jsonl"
+    events_file.write_text("", encoding="utf-8")
+    session_file = tmp_path / "session.json"
+    artifact_bundle = autoloop.ArtifactBundle(
+        pair="plan",
+        scope="task-global",
+        artifact_dir=tmp_path,
+        criteria_file=tmp_path / "criteria.md",
+        feedback_file=tmp_path / "feedback.md",
+        artifact_files={},
+        allowed_verifier_prefixes=(),
+    )
+
+    def fake_run(args, **kwargs):
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="not-json", stderr="warn")
+
+    monkeypatch.setattr(autoloop.subprocess, "run", fake_run)
+    monkeypatch.setattr(autoloop, "fatal", lambda message, exit_code=1: (_ for _ in ()).throw(RuntimeError(message)))
+
+    with pytest.raises(RuntimeError, match="Claude CLI returned invalid JSON output"):
+        autoloop.run_provider_phase(
+            autoloop.ProviderRuntime(name="claude", claude=ClaudeProviderConfig()),
+            tmp_path,
+            "templates/plan_producer.md",
+            "Prompt body\n",
+            "producer",
+            "plan",
+            1,
+            1,
+            "run-1",
+            request_file,
+            session_file,
+            artifact_bundle,
+            run_raw_phase_log,
+            task_raw_phase_log,
+            events_file,
+            tmp_path,
+            decisions_file,
+        )
+
+    task_raw_text = task_raw_phase_log.read_text(encoding="utf-8")
+    run_raw_text = run_raw_phase_log.read_text(encoding="utf-8")
+    assert "entry=provider_failure" in task_raw_text
+    assert "provider=claude" in task_raw_text
+    assert "STDOUT:\nnot-json" in task_raw_text
+    assert "STDERR:\nwarn" in task_raw_text
+    assert "entry=provider_failure" in run_raw_text
 
 
 def test_tracked_autoloop_paths_excludes_runs_directory():
@@ -2472,6 +3081,58 @@ def test_main_resume_with_missing_thread_id_starts_new_conversation_and_logs_not
     raw_log_text = run_paths["raw_phase_log"].read_text(encoding="utf-8")
     assert "new conversation for the next phase" in raw_log_text
     assert "entry=session_recovery" in raw_log_text
+
+
+def test_main_resume_refuses_provider_mismatch(tmp_path: Path, monkeypatch):
+    install_fake_yaml(monkeypatch)
+    paths = ensure_workspace(
+        root=tmp_path,
+        task_id="provider-mismatch",
+        product_intent="Legacy request",
+        intent_mode="replace",
+    )
+    run_paths = create_run_paths(paths["runs_dir"], "run-20260316T120000Z-abcdef12", "Legacy request")
+    run_paths["plan_session_file"].write_text(
+        json.dumps(
+            {
+                "mode": "persistent",
+                "provider": "claude",
+                "session_id": "claude-session-1",
+                "thread_id": None,
+                "pending_clarification_note": None,
+                "created_at": "2026-03-16T12:00:00Z",
+                "last_used_at": "2026-03-16T12:05:00Z",
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(autoloop, "check_dependencies", lambda *args, **kwargs: None)
+    monkeypatch.setattr(autoloop, "resolve_codex_exec_command", lambda _provider: fake_codex_command())
+    monkeypatch.setattr(
+        autoloop.sys,
+        "argv",
+        [
+            "autoloop.py",
+            "--workspace",
+            str(tmp_path),
+            "--pairs",
+            "plan",
+            "--task-id",
+            "provider-mismatch",
+            "--resume",
+            "--run-id",
+            "run-20260316T120000Z-abcdef12",
+            "--max-iterations",
+            "1",
+            "--no-git",
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        autoloop.main()
 
 
 def test_main_resume_reconstructs_missing_request_from_legacy_context_not_current_task_request(tmp_path: Path, monkeypatch):

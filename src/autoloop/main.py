@@ -16,10 +16,11 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from functools import lru_cache
 from datetime import datetime, timezone
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import uuid4
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
@@ -90,6 +91,10 @@ IMPLICIT_PHASE_ID = "implicit-phase"
 MAX_PHASE_ID_UTF8_BYTES = 96
 PHASE_DIR_SAFE_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 DEFAULT_CODEX_MODEL = "gpt-5.4"
+DEFAULT_PROVIDER_NAME = "codex"
+SUPPORTED_PROVIDER_NAMES = frozenset({"codex", "claude"})
+DEFAULT_CLAUDE_PERMISSION_STRATEGY = "inherit"
+SUPPORTED_CLAUDE_PERMISSION_STRATEGIES = frozenset({"inherit", "allow_core_tools", "bypass"})
 DEFAULT_PAIRS = "plan,implement,test"
 DEFAULT_MAX_ITERATIONS = 15
 DEFAULT_PHASE_MODE = PHASE_MODE_SINGLE
@@ -171,15 +176,43 @@ class CodexCommandConfig:
 
 
 @dataclass(frozen=True)
-class ProviderConfig:
+class CodexProviderConfig:
     model: str
     model_effort: Optional[str] = None
 
 
 @dataclass(frozen=True)
-class ProviderConfigOverride:
+class ClaudeProviderConfig:
+    model: Optional[str] = None
+    effort: Optional[str] = None
+    permission_strategy: str = DEFAULT_CLAUDE_PERMISSION_STRATEGY
+
+
+@dataclass(frozen=True)
+class ProviderConfig:
+    name: str = DEFAULT_PROVIDER_NAME
+    codex: CodexProviderConfig = field(default_factory=lambda: CodexProviderConfig(model=DEFAULT_CODEX_MODEL))
+    claude: ClaudeProviderConfig = field(default_factory=ClaudeProviderConfig)
+
+
+@dataclass(frozen=True)
+class CodexProviderConfigOverride:
     model: Optional[str] = None
     model_effort: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class ClaudeProviderConfigOverride:
+    model: Optional[str] = None
+    effort: Optional[str] = None
+    permission_strategy: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class ProviderConfigOverride:
+    name: Optional[str] = None
+    codex: CodexProviderConfigOverride = field(default_factory=CodexProviderConfigOverride)
+    claude: ClaudeProviderConfigOverride = field(default_factory=ClaudeProviderConfigOverride)
 
 
 @dataclass(frozen=True)
@@ -204,8 +237,8 @@ class RuntimeConfigOverride:
 
 @dataclass(frozen=True)
 class AutoloopConfigOverride:
-    provider: ProviderConfigOverride = ProviderConfigOverride()
-    runtime: RuntimeConfigOverride = RuntimeConfigOverride()
+    provider: ProviderConfigOverride = field(default_factory=ProviderConfigOverride)
+    runtime: RuntimeConfigOverride = field(default_factory=RuntimeConfigOverride)
 
 
 @dataclass(frozen=True)
@@ -217,10 +250,65 @@ class ResolvedAutoloopConfig:
 @dataclass
 class SessionState:
     mode: str
-    thread_id: Optional[str]
-    pending_clarification_note: Optional[str]
-    created_at: str
+    provider: str = DEFAULT_PROVIDER_NAME
+    session_id: Optional[str] = None
+    thread_id: Optional[str] = None
+    provider_metadata: Dict[str, Any] = field(default_factory=dict)
+    model_override: Optional[str] = None
+    effort_override: Optional[str] = None
+    pending_clarification_note: Optional[str] = None
+    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     last_used_at: Optional[str] = None
+
+    def __post_init__(self):
+        if self.provider not in SUPPORTED_PROVIDER_NAMES:
+            self.provider = DEFAULT_PROVIDER_NAME
+        if self.session_id is None and self.thread_id is not None:
+            self.session_id = self.thread_id
+        if self.provider == "codex":
+            self.thread_id = self.session_id
+        else:
+            self.thread_id = None
+
+    def set_provider(self, provider: str) -> None:
+        self.provider = provider if provider in SUPPORTED_PROVIDER_NAMES else DEFAULT_PROVIDER_NAME
+        if self.provider == "codex":
+            self.thread_id = self.session_id
+        else:
+            self.thread_id = None
+
+    def set_session_id(self, session_id: Optional[str]) -> None:
+        self.session_id = session_id
+        if self.provider == "codex":
+            self.thread_id = session_id
+
+
+@dataclass(frozen=True)
+class ProviderRuntime:
+    name: str
+    codex_command: Optional[CodexCommandConfig] = None
+    codex: Optional[CodexProviderConfig] = None
+    claude: Optional[ClaudeProviderConfig] = None
+
+
+@dataclass(frozen=True)
+class ProviderTurnResult:
+    stdout: str
+    session_id: Optional[str]
+    raw_output: str
+    command_mode: str
+    provider_metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ProviderExecutionError(RuntimeError):
+    provider_name: str
+    message: str
+    raw_output: str
+    command_mode: str
+
+    def __str__(self) -> str:
+        return self.message
 
 
 @dataclass
@@ -802,11 +890,21 @@ def _format_unknown_keys(keys: Iterable[object]) -> str:
     return ", ".join(sorted(str(key) for key in keys))
 
 
+def _parse_provider_name(raw_value: object, label: str, source: Path) -> Optional[str]:
+    name = _optional_config_string(raw_value, label, source)
+    if name is None:
+        return None
+    if name not in SUPPORTED_PROVIDER_NAMES:
+        supported = ", ".join(sorted(SUPPORTED_PROVIDER_NAMES))
+        raise ConfigError(f"{source}: {label} must be one of: {supported}.")
+    return name
+
+
 def parse_autoloop_config(payload: object, source: Path) -> AutoloopConfigOverride:
     if not isinstance(payload, dict):
         raise ConfigError(f"{source}: configuration must be a YAML mapping.")
 
-    unknown_top_level = sorted(key for key in payload if key not in {"provider", "runtime"})
+    unknown_top_level = [key for key in payload if key not in {"provider", "runtime"}]
     if unknown_top_level:
         raise ConfigError(f"{source}: unsupported top-level keys: {_format_unknown_keys(unknown_top_level)}")
 
@@ -814,23 +912,69 @@ def parse_autoloop_config(payload: object, source: Path) -> AutoloopConfigOverri
     if provider_payload is not None and not isinstance(provider_payload, dict):
         raise ConfigError(f"{source}: provider must be a mapping.")
     provider_payload = provider_payload or {}
-    unknown_provider_keys = sorted(key for key in provider_payload if key not in {"model", "model_effort"})
+    unknown_provider_keys = [
+        key for key in provider_payload if key not in {"name", "model", "model_effort", "codex", "claude"}
+    ]
     if unknown_provider_keys:
         raise ConfigError(f"{source}: unsupported provider keys: {_format_unknown_keys(unknown_provider_keys)}")
+    provider_name = _parse_provider_name(provider_payload.get("name"), "provider.name", source)
+    codex_payload = provider_payload.get("codex")
+    if codex_payload is not None and not isinstance(codex_payload, dict):
+        raise ConfigError(f"{source}: provider.codex must be a mapping.")
+    codex_payload = codex_payload or {}
+    unknown_codex_keys = [key for key in codex_payload if key not in {"model", "model_effort"}]
+    if unknown_codex_keys:
+        raise ConfigError(f"{source}: unsupported provider.codex keys: {_format_unknown_keys(unknown_codex_keys)}")
+    claude_payload = provider_payload.get("claude")
+    if claude_payload is not None and not isinstance(claude_payload, dict):
+        raise ConfigError(f"{source}: provider.claude must be a mapping.")
+    claude_payload = claude_payload or {}
+    unknown_claude_keys = [key for key in claude_payload if key not in {"model", "effort", "permission_strategy"}]
+    if unknown_claude_keys:
+        raise ConfigError(f"{source}: unsupported provider.claude keys: {_format_unknown_keys(unknown_claude_keys)}")
+    flat_codex_model = _optional_config_string(provider_payload.get("model"), "provider.model", source)
+    flat_codex_effort = _optional_config_string(provider_payload.get("model_effort"), "provider.model_effort", source)
+    if provider_name == "claude" and (flat_codex_model is not None or flat_codex_effort is not None):
+        raise ConfigError(
+            f"{source}: legacy provider.model/provider.model_effort keys are only valid with provider.name: codex."
+        )
+    claude_permission_strategy = _optional_config_string(
+        claude_payload.get("permission_strategy"),
+        "provider.claude.permission_strategy",
+        source,
+    )
+    if (
+        claude_permission_strategy is not None
+        and claude_permission_strategy not in SUPPORTED_CLAUDE_PERMISSION_STRATEGIES
+    ):
+        supported = ", ".join(sorted(SUPPORTED_CLAUDE_PERMISSION_STRATEGIES))
+        raise ConfigError(f"{source}: provider.claude.permission_strategy must be one of: {supported}.")
     provider = ProviderConfigOverride(
-        model=_optional_config_string(provider_payload.get("model"), "provider.model", source),
-        model_effort=_optional_config_string(provider_payload.get("model_effort"), "provider.model_effort", source),
+        name=provider_name,
+        codex=CodexProviderConfigOverride(
+            model=flat_codex_model
+            if flat_codex_model is not None
+            else _optional_config_string(codex_payload.get("model"), "provider.codex.model", source),
+            model_effort=flat_codex_effort
+            if flat_codex_effort is not None
+            else _optional_config_string(codex_payload.get("model_effort"), "provider.codex.model_effort", source),
+        ),
+        claude=ClaudeProviderConfigOverride(
+            model=_optional_config_string(claude_payload.get("model"), "provider.claude.model", source),
+            effort=_optional_config_string(claude_payload.get("effort"), "provider.claude.effort", source),
+            permission_strategy=claude_permission_strategy,
+        ),
     )
 
     runtime_payload = payload.get("runtime")
     if runtime_payload is not None and not isinstance(runtime_payload, dict):
         raise ConfigError(f"{source}: runtime must be a mapping.")
     runtime_payload = runtime_payload or {}
-    unknown_runtime_keys = sorted(
+    unknown_runtime_keys = [
         key
         for key in runtime_payload
         if key not in {"pairs", "max_iterations", "phase_mode", "intent_mode", "full_auto_answers", "no_git"}
-    )
+    ]
     if unknown_runtime_keys:
         raise ConfigError(f"{source}: unsupported runtime keys: {_format_unknown_keys(unknown_runtime_keys)}")
     phase_mode = _optional_config_string(runtime_payload.get("phase_mode"), "runtime.phase_mode", source)
@@ -854,11 +998,11 @@ def parse_autoloop_config(payload: object, source: Path) -> AutoloopConfigOverri
     )
 
 
-def _merge_provider_config(
-    *layers: ProviderConfigOverride,
+def _merge_codex_provider_config(
+    *layers: CodexProviderConfigOverride,
     cli_model: Optional[str],
     cli_model_effort: Optional[str],
-) -> ProviderConfig:
+) -> CodexProviderConfig:
     model = DEFAULT_CODEX_MODEL
     model_effort: Optional[str] = None
 
@@ -873,7 +1017,42 @@ def _merge_provider_config(
     if cli_model_effort is not None:
         model_effort = cli_model_effort
 
-    return ProviderConfig(model=model, model_effort=model_effort)
+    return CodexProviderConfig(model=model, model_effort=model_effort)
+
+
+def _merge_claude_provider_config(*layers: ClaudeProviderConfigOverride) -> ClaudeProviderConfig:
+    model: Optional[str] = None
+    effort: Optional[str] = None
+    permission_strategy = DEFAULT_CLAUDE_PERMISSION_STRATEGY
+
+    for layer in layers:
+        if layer.model is not None:
+            model = layer.model
+        if layer.effort is not None:
+            effort = layer.effort
+        if layer.permission_strategy is not None:
+            permission_strategy = layer.permission_strategy
+
+    return ClaudeProviderConfig(model=model, effort=effort, permission_strategy=permission_strategy)
+
+
+def _merge_provider_config(
+    *layers: ProviderConfigOverride,
+    cli_model: Optional[str],
+    cli_model_effort: Optional[str],
+) -> ProviderConfig:
+    name = DEFAULT_PROVIDER_NAME
+    for layer in layers:
+        if layer.name is not None:
+            name = layer.name
+
+    codex = _merge_codex_provider_config(
+        *(layer.codex for layer in layers),
+        cli_model=cli_model,
+        cli_model_effort=cli_model_effort,
+    )
+    claude = _merge_claude_provider_config(*(layer.claude for layer in layers))
+    return ProviderConfig(name=name, codex=codex, claude=claude)
 
 
 def _merge_runtime_config(*layers: RuntimeConfigOverride, args: argparse.Namespace) -> RuntimeConfig:
@@ -1570,14 +1749,34 @@ def append_runtime_notice(
     append_runtime_raw_log(run_raw_phase_log, run_id, entry, message)
 
 
-def load_session_state(session_file: Path, default_mode: str) -> SessionState:
+def load_session_state(session_file: Path, default_mode: str, default_provider: str = DEFAULT_PROVIDER_NAME) -> SessionState:
     if session_file.exists():
         try:
             payload = json.loads(session_file.read_text(encoding="utf-8"))
             if isinstance(payload, dict):
+                has_explicit_provider = "provider" in payload
+                provider = payload.get("provider") if isinstance(payload.get("provider"), str) else default_provider
+                if not has_explicit_provider:
+                    provider = "codex"
+                session_id = payload.get("session_id") if isinstance(payload.get("session_id"), str) else None
+                thread_id = payload.get("thread_id") if isinstance(payload.get("thread_id"), str) else None
+                if session_id is None and thread_id is not None:
+                    session_id = thread_id
+                provider_metadata = payload.get("provider_metadata")
+                if not isinstance(provider_metadata, dict):
+                    provider_metadata = {}
                 return SessionState(
                     mode=str(payload.get("mode") or default_mode),
-                    thread_id=payload.get("thread_id") if isinstance(payload.get("thread_id"), str) else None,
+                    provider=provider,
+                    session_id=session_id,
+                    thread_id=thread_id,
+                    provider_metadata=dict(provider_metadata),
+                    model_override=payload.get("model_override")
+                    if isinstance(payload.get("model_override"), str)
+                    else None,
+                    effort_override=payload.get("effort_override")
+                    if isinstance(payload.get("effort_override"), str)
+                    else None,
                     pending_clarification_note=payload.get("pending_clarification_note")
                     if isinstance(payload.get("pending_clarification_note"), str)
                     else None,
@@ -1588,7 +1787,12 @@ def load_session_state(session_file: Path, default_mode: str) -> SessionState:
             pass
     return SessionState(
         mode=default_mode,
+        provider=default_provider,
+        session_id=None,
         thread_id=None,
+        provider_metadata={},
+        model_override=None,
+        effort_override=None,
         pending_clarification_note=None,
         created_at=datetime.now(timezone.utc).isoformat(),
     )
@@ -1597,7 +1801,12 @@ def load_session_state(session_file: Path, default_mode: str) -> SessionState:
 def save_session_state(session_file: Path, state: SessionState):
     payload = {
         "mode": state.mode,
-        "thread_id": state.thread_id,
+        "provider": state.provider,
+        "session_id": state.session_id,
+        "thread_id": state.session_id if state.provider == "codex" else None,
+        "provider_metadata": state.provider_metadata,
+        "model_override": state.model_override,
+        "effort_override": state.effort_override,
         "pending_clarification_note": state.pending_clarification_note,
         "created_at": state.created_at,
         "last_used_at": state.last_used_at,
@@ -1682,19 +1891,46 @@ def try_commit_tracked_changes(root: Path, message: str, tracked_paths: Optional
     return True
 
 
-def check_dependencies(require_git: bool = True):
+def check_dependencies(provider_name: str = DEFAULT_PROVIDER_NAME, require_git: bool = True):
     missing = []
     if require_git and not shutil.which("git"):
         missing.append("git")
-    if not shutil.which("codex"):
+    if provider_name == "codex" and not shutil.which("codex"):
         missing.append("codex (install via 'npm i -g @openai/codex')")
+    if provider_name == "claude" and not shutil.which("claude"):
+        missing.append("claude")
     if missing:
         fatal(f"[!] FATAL: Missing required dependencies: {', '.join(missing)}")
+    if provider_name == "claude":
+        version_result = subprocess.run(
+            ["claude", "--version"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        if version_result.returncode != 0:
+            details = (
+                version_result.stderr.strip()
+                or version_result.stdout.strip()
+                or "Unable to verify `claude --version`."
+            )
+            fatal(f"[!] FATAL CLAUDE ERROR: {details}")
+        auth_result = subprocess.run(
+            ["claude", "auth", "status"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        if auth_result.returncode != 0:
+            details = auth_result.stderr.strip() or auth_result.stdout.strip() or "Claude authentication is not available."
+            fatal(f"[!] FATAL CLAUDE ERROR: `claude auth status` failed. {details}")
 
 
-def resolve_codex_exec_command(provider: ProviderConfig | str) -> CodexCommandConfig:
+def resolve_codex_exec_command(provider: ProviderConfig | CodexProviderConfig | str) -> CodexCommandConfig:
     if isinstance(provider, str):
-        provider = ProviderConfig(model=provider)
+        provider = CodexProviderConfig(model=provider)
+    if isinstance(provider, ProviderConfig):
+        provider = provider.codex
     model = provider.model
     model_effort = provider.model_effort
 
@@ -1781,6 +2017,234 @@ def resolve_codex_exec_command(provider: ProviderConfig | str) -> CodexCommandCo
     fatal(
         "[!] FATAL CODEX ERROR: This Autoloop version requires `codex exec` support for "
         "either --dangerously-bypass-approvals-and-sandbox or --full-auto."
+    )
+
+
+def resolve_provider_runtime(provider: ProviderConfig) -> ProviderRuntime:
+    if provider.name == "codex":
+        return ProviderRuntime(
+            name="codex",
+            codex_command=resolve_codex_exec_command(provider.codex),
+            codex=provider.codex,
+        )
+    if provider.name == "claude":
+        return ProviderRuntime(name="claude", claude=provider.claude)
+    fatal(f"[!] FATAL: Unsupported provider: {provider.name}")
+
+
+def ensure_session_provider_match(session_state: SessionState, provider_name: str, *, context: str) -> None:
+    if session_state.provider != provider_name:
+        fatal(
+            f"[!] FATAL: Cannot {context} with provider `{provider_name}` because the stored session belongs to "
+            f"`{session_state.provider}`. Start a new run to switch providers."
+        )
+
+
+def _format_provider_raw_output(stdout: str, stderr: str) -> str:
+    parts: List[str] = []
+    if stdout.strip():
+        parts.append(f"STDOUT:\n{stdout.rstrip()}")
+    if stderr.strip():
+        parts.append(f"STDERR:\n{stderr.rstrip()}")
+    if not parts:
+        return "[empty stdout/stderr]"
+    return "\n\n".join(parts)
+
+
+def parse_claude_exec_json(raw_output: str) -> Tuple[str, Optional[str], Dict[str, Any]]:
+    stripped = raw_output.strip()
+    if not stripped:
+        raise ValueError("Claude CLI returned empty stdout instead of JSON.")
+    try:
+        payload = json.loads(stripped)
+    except json.JSONDecodeError as exc:
+        raise ValueError("Claude CLI returned malformed JSON.") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("Claude CLI JSON payload must be an object.")
+    result = payload.get("result")
+    if not isinstance(result, str):
+        raise ValueError("Claude CLI JSON payload did not include a string `result` field.")
+    session_id = payload.get("session_id") if isinstance(payload.get("session_id"), str) else None
+    metadata = dict(payload)
+    metadata.pop("result", None)
+    return result, session_id, metadata
+
+
+def _claude_permission_args(config: ClaudeProviderConfig) -> List[str]:
+    if config.permission_strategy == "inherit":
+        return []
+    if config.permission_strategy == "allow_core_tools":
+        return ["--allowedTools", "Read,Write,Edit,Glob,Grep,Bash"]
+    if config.permission_strategy == "bypass":
+        return ["--dangerously-skip-permissions"]
+    fatal(
+        "[!] FATAL CLAUDE ERROR: Unsupported permission strategy "
+        f"{config.permission_strategy!r}. Expected one of: {', '.join(sorted(SUPPORTED_CLAUDE_PERMISSION_STRATEGIES))}."
+    )
+
+
+def provider_runtime_overrides(provider_runtime: ProviderRuntime) -> Tuple[Optional[str], Optional[str]]:
+    if provider_runtime.name == "claude" and provider_runtime.claude is not None:
+        return provider_runtime.claude.model, provider_runtime.claude.effort
+    return None, None
+
+
+def log_provider_failure_and_fatal(
+    *,
+    provider_runtime: ProviderRuntime,
+    error: ProviderExecutionError,
+    raw_logs: Sequence[Path],
+    run_id: str,
+    context: str,
+    pair: Optional[str] = None,
+    phase: Optional[str] = None,
+    cycle: Optional[int] = None,
+    attempt: Optional[int] = None,
+    template_provenance: Optional[str] = None,
+) -> None:
+    body_lines = [
+        f"provider={provider_runtime.name}",
+        f"context={context}",
+        f"mode={error.command_mode}",
+    ]
+    if template_provenance is not None:
+        body_lines.append(f"template={template_provenance}")
+    body_lines.extend(
+        [
+            f"error={error.message}",
+            "",
+            error.raw_output,
+        ]
+    )
+    body = "\n".join(body_lines)
+    for raw_log in raw_logs:
+        append_runtime_raw_log(
+            raw_log,
+            run_id,
+            "provider_failure",
+            body,
+            pair=pair,
+            phase=phase,
+            cycle=cycle,
+            attempt=attempt,
+        )
+    fatal(error.message)
+
+
+def execute_provider_turn(
+    provider_runtime: ProviderRuntime,
+    *,
+    cwd: Path,
+    prompt: str,
+    session_id: Optional[str],
+    append_system_prompt_text: Optional[str] = None,
+) -> ProviderTurnResult:
+    if provider_runtime.name == "codex":
+        if provider_runtime.codex_command is None:
+            fatal(f"[!] FATAL: Provider `{provider_runtime.name}` is not executable in this build.")
+        if session_id:
+            command = [*provider_runtime.codex_command.resume_command, session_id, "-"]
+            command_mode = "resume"
+        else:
+            command = list(provider_runtime.codex_command.start_command)
+            command_mode = "start"
+
+        process = subprocess.run(
+            command,
+            cwd=cwd,
+            input=prompt,
+            text=True,
+            capture_output=True,
+            encoding="utf-8",
+        )
+        raw_exec_output = process.stdout or ""
+        raw_output = _format_provider_raw_output(process.stdout or "", process.stderr or "")
+        if process.returncode != 0:
+            raise ProviderExecutionError(
+                provider_name="codex",
+                message=f"[!] Codex CLI failed with exit code {process.returncode}.",
+                raw_output=raw_output,
+                command_mode=command_mode,
+            )
+        stdout, parsed_session_id = parse_codex_exec_json(raw_exec_output)
+        return ProviderTurnResult(
+            stdout=stdout,
+            session_id=parsed_session_id or session_id,
+            raw_output=raw_output,
+            command_mode=command_mode,
+            provider_metadata={},
+        )
+
+    if provider_runtime.name != "claude" or provider_runtime.claude is None:
+        fatal(f"[!] FATAL: Provider `{provider_runtime.name}` is not executable in this build.")
+
+    command = ["claude", "-p", prompt, "--output-format", "json"]
+    if append_system_prompt_text is not None:
+        temp_file = tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            prefix="autoloop-claude-prompt-",
+            suffix=".md",
+            delete=False,
+        )
+        try:
+            temp_file.write(append_system_prompt_text)
+            temp_file.flush()
+        finally:
+            temp_file.close()
+        prompt_file = Path(temp_file.name)
+        command.extend(["--append-system-prompt-file", str(prompt_file)])
+    else:
+        prompt_file = None
+    if provider_runtime.claude.model is not None:
+        command.extend(["--model", provider_runtime.claude.model])
+    if provider_runtime.claude.effort is not None:
+        command.extend(["--effort", provider_runtime.claude.effort])
+    command.extend(_claude_permission_args(provider_runtime.claude))
+    if session_id:
+        command.extend(["--resume", session_id])
+        command_mode = "resume"
+    else:
+        command_mode = "start"
+
+    try:
+        process = subprocess.run(
+            command,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+    finally:
+        if prompt_file is not None:
+            try:
+                prompt_file.unlink()
+            except OSError:
+                pass
+
+    raw_output = _format_provider_raw_output(process.stdout or "", process.stderr or "")
+    if process.returncode != 0:
+        raise ProviderExecutionError(
+            provider_name="claude",
+            message=f"[!] Claude CLI failed with exit code {process.returncode}.",
+            raw_output=raw_output,
+            command_mode=command_mode,
+        )
+    try:
+        stdout, parsed_session_id, provider_metadata = parse_claude_exec_json(process.stdout or "")
+    except ValueError as exc:
+        raise ProviderExecutionError(
+            provider_name="claude",
+            message=f"[!] Claude CLI returned invalid JSON output: {exc}",
+            raw_output=raw_output,
+            command_mode=command_mode,
+        ) from exc
+    return ProviderTurnResult(
+        stdout=stdout,
+        session_id=parsed_session_id or session_id,
+        raw_output=raw_output,
+        command_mode=command_mode,
+        provider_metadata=provider_metadata,
     )
 
 def parse_pairs(pairs_arg: str, max_iterations: int) -> List[PairConfig]:
@@ -2013,7 +2477,13 @@ def create_run_id() -> str:
     return f"run-{timestamp}-{uuid4().hex[:8]}"
 
 
-def create_run_paths(runs_dir: Path, run_id: str, request_text: Optional[str], session_mode: str = "persistent") -> Dict[str, Path]:
+def create_run_paths(
+    runs_dir: Path,
+    run_id: str,
+    request_text: Optional[str],
+    session_mode: str = "persistent",
+    provider_name: str = DEFAULT_PROVIDER_NAME,
+) -> Dict[str, Path]:
     run_dir = runs_dir / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -2030,7 +2500,7 @@ def create_run_paths(runs_dir: Path, run_id: str, request_text: Optional[str], s
     phases_sessions_dir.mkdir(parents=True, exist_ok=True)
     plan_state_file = plan_session_file(run_dir)
     write_request_snapshot(request_file, request_text)
-    save_session_state(plan_state_file, load_session_state(plan_state_file, session_mode))
+    save_session_state(plan_state_file, load_session_state(plan_state_file, session_mode, default_provider=provider_name))
 
     return {
         "run_dir": run_dir,
@@ -2249,11 +2719,9 @@ def build_fresh_phase_bootstrap(
     return bootstrap
 
 
-def build_phase_prompt(
+def build_phase_preamble(
     *,
     cwd: Path,
-    template_provenance: str,
-    rendered_template_text: str,
     request_file: Path,
     run_raw_phase_log: Path,
     decisions_file: Path,
@@ -2273,8 +2741,9 @@ def build_phase_prompt(
     prior_phase_ids: Sequence[str] = (),
     prior_phase_keys: Sequence[str] = (),
 ) -> str:
-    base_instructions = rendered_template_text
     request_text = request_file.read_text(encoding="utf-8").strip()
+    session_id = getattr(session_state, "session_id", getattr(session_state, "thread_id", None))
+    session_provider = getattr(session_state, "provider", "codex")
     preamble = [
         f"REPOSITORY ROOT: {cwd}",
         f"RUN ID: {run_id}",
@@ -2293,8 +2762,11 @@ def build_phase_prompt(
         "Only explicit clarification entries may change user intent.",
         "Use repo-wide exploration only for dependency and regression analysis; do not absorb unrelated dirty files into scope unless explicitly justified.",
     ]
-    if session_state.thread_id:
-        preamble.append(f"RESUMED THREAD ID: {session_state.thread_id}")
+    if session_id:
+        if session_provider == "codex":
+            preamble.append(f"RESUMED THREAD ID: {session_id}")
+        else:
+            preamble.append(f"RESUMED SESSION ID: {session_id}")
     else:
         preamble.append("THREAD STATUS: new thread starts on this turn.")
     if session_state.pending_clarification_note:
@@ -2365,7 +2837,253 @@ def build_phase_prompt(
                 ),
             ]
         )
-    return "\n".join(preamble) + "\n\nFollow the prompt rules exactly.\n\n" + base_instructions
+    return "\n".join(preamble)
+
+
+def build_phase_prompt(
+    *,
+    cwd: Path,
+    template_provenance: str,
+    rendered_template_text: str,
+    request_file: Path,
+    run_raw_phase_log: Path,
+    decisions_file: Path,
+    pair_name: str,
+    phase_name: str,
+    cycle_num: int,
+    attempt_num: int,
+    run_id: str,
+    session_state: SessionState,
+    include_request_snapshot: bool,
+    artifact_bundle: Optional[ArtifactBundle] = None,
+    session_file: Path,
+    is_fresh_phase_thread: bool = False,
+    events_file: Optional[Path] = None,
+    task_dir: Optional[Path] = None,
+    active_phase_selection: Optional[ResolvedPhaseSelection] = None,
+    prior_phase_ids: Sequence[str] = (),
+    prior_phase_keys: Sequence[str] = (),
+) -> str:
+    del template_provenance
+    preamble = build_phase_preamble(
+        cwd=cwd,
+        request_file=request_file,
+        run_raw_phase_log=run_raw_phase_log,
+        decisions_file=decisions_file,
+        pair_name=pair_name,
+        phase_name=phase_name,
+        cycle_num=cycle_num,
+        attempt_num=attempt_num,
+        run_id=run_id,
+        session_state=session_state,
+        include_request_snapshot=include_request_snapshot,
+        artifact_bundle=artifact_bundle,
+        session_file=session_file,
+        is_fresh_phase_thread=is_fresh_phase_thread,
+        events_file=events_file,
+        task_dir=task_dir,
+        active_phase_selection=active_phase_selection,
+        prior_phase_ids=prior_phase_ids,
+        prior_phase_keys=prior_phase_keys,
+    )
+    return preamble + "\n\nFollow the prompt rules exactly.\n\n" + rendered_template_text
+
+
+def build_claude_append_system_prompt(rendered_template_text: str) -> str:
+    guardrails = (
+        "Autoloop orchestration contract overrides Claude-native workflow helpers for this run.\n"
+        "Do not use AskUserQuestion, Agent, EnterPlanMode, ExitPlanMode, EnterWorktree, Skill, "
+        "task-management helpers, or other out-of-band question/planning tools to bypass Autoloop.\n"
+        "Keep all clarifications, completion decisions, and blocking states inside the canonical "
+        "<loop-control> contract required by the appended instructions.\n"
+        "Do not invent an alternate approval, completion, or clarification channel.\n"
+    )
+    return guardrails + "\n" + rendered_template_text
+
+
+def run_provider_phase(
+    provider_runtime: ProviderRuntime,
+    cwd: Path,
+    template_provenance: str,
+    rendered_template_text: str,
+    phase_name: str,
+    pair_name: str,
+    cycle_num: int,
+    attempt_num: int,
+    run_id: str,
+    request_file: Path,
+    session_file: Path,
+    artifact_bundle: ArtifactBundle,
+    run_raw_phase_log: Path,
+    raw_phase_log: Path,
+    events_file: Path,
+    task_dir: Path,
+    decisions_file: Path,
+    active_phase_selection: Optional[ResolvedPhaseSelection] = None,
+    prior_phase_ids: Sequence[str] = (),
+    prior_phase_keys: Sequence[str] = (),
+) -> str:
+    session_state = load_session_state(session_file, "persistent", default_provider=provider_runtime.name)
+    ensure_session_provider_match(
+        session_state,
+        provider_runtime.name,
+        context=f"resume {pair_name}:{phase_name}",
+    )
+    session_state.mode = "persistent"
+    include_request_snapshot = session_state.session_id is None
+    prompt_kwargs = dict(
+        cwd=cwd,
+        request_file=request_file,
+        run_raw_phase_log=run_raw_phase_log,
+        decisions_file=decisions_file,
+        pair_name=pair_name,
+        phase_name=phase_name,
+        cycle_num=cycle_num,
+        attempt_num=attempt_num,
+        run_id=run_id,
+        session_state=session_state,
+        include_request_snapshot=include_request_snapshot,
+        artifact_bundle=artifact_bundle,
+        session_file=session_file,
+        is_fresh_phase_thread=include_request_snapshot and pair_name in PHASED_PAIRS,
+        events_file=events_file,
+        task_dir=task_dir,
+        active_phase_selection=active_phase_selection,
+        prior_phase_ids=prior_phase_ids,
+        prior_phase_keys=prior_phase_keys,
+    )
+    append_system_prompt_text: Optional[str] = None
+    if provider_runtime.name == "claude":
+        prompt_payload = build_phase_preamble(**prompt_kwargs)
+        append_system_prompt_text = build_claude_append_system_prompt(rendered_template_text)
+    else:
+        prompt_payload = build_phase_prompt(
+            template_provenance=template_provenance,
+            rendered_template_text=rendered_template_text,
+            **prompt_kwargs,
+        )
+
+    print(f"[*] Spawning {pair_name}:{phase_name} agent...")
+    try:
+        turn_result = execute_provider_turn(
+            provider_runtime,
+            cwd=cwd,
+            prompt=prompt_payload,
+            session_id=session_state.session_id,
+            append_system_prompt_text=append_system_prompt_text,
+        )
+    except ProviderExecutionError as exc:
+        log_provider_failure_and_fatal(
+            provider_runtime=provider_runtime,
+            error=exc,
+            raw_logs=(raw_phase_log, run_raw_phase_log),
+            run_id=run_id,
+            context="phase_turn",
+            pair=pair_name,
+            phase=phase_name,
+            cycle=cycle_num,
+            attempt=attempt_num,
+            template_provenance=template_provenance,
+        )
+    stdout = turn_result.stdout
+    session_state.set_provider(provider_runtime.name)
+    session_state.set_session_id(turn_result.session_id)
+    session_state.provider_metadata = turn_result.provider_metadata
+    session_state.model_override, session_state.effort_override = provider_runtime_overrides(provider_runtime)
+    session_state.last_used_at = datetime.now(timezone.utc).isoformat()
+    session_state.pending_clarification_note = None
+    save_session_state(session_file, session_state)
+
+    append_runtime_raw_log(
+        raw_phase_log,
+        run_id,
+        "session_turn",
+        (
+            f"provider={provider_runtime.name}\n"
+            f"mode={turn_result.command_mode}\n"
+            f"template={template_provenance}\n"
+            f"session_id={session_state.session_id}"
+        ),
+        pair=pair_name,
+        phase=phase_name,
+        cycle=cycle_num,
+        attempt=attempt_num,
+        thread_id=session_state.thread_id,
+    )
+    append_runtime_raw_log(
+        run_raw_phase_log,
+        run_id,
+        "session_turn",
+        (
+            f"provider={provider_runtime.name}\n"
+            f"mode={turn_result.command_mode}\n"
+            f"template={template_provenance}\n"
+            f"session_id={session_state.session_id}"
+        ),
+        pair=pair_name,
+        phase=phase_name,
+        cycle=cycle_num,
+        attempt=attempt_num,
+        thread_id=session_state.thread_id,
+    )
+
+    append_raw_phase_log(
+        raw_phase_log,
+        pair_name,
+        phase_name,
+        cycle_num,
+        attempt_num,
+        f"{provider_runtime.name}-agent",
+        stdout,
+        run_id=run_id,
+        thread_id=session_state.thread_id,
+    )
+    append_raw_phase_log(
+        run_raw_phase_log,
+        pair_name,
+        phase_name,
+        cycle_num,
+        attempt_num,
+        f"{provider_runtime.name}-agent",
+        stdout,
+        run_id=run_id,
+        thread_id=session_state.thread_id,
+    )
+
+    if turn_result.command_mode == "start" and not turn_result.session_id:
+        if provider_runtime.name == "codex":
+            warning_message = (
+                f"Codex CLI did not return a thread id during {pair_name}:{phase_name}; "
+                "future phases will start a new conversation unless one becomes available."
+            )
+        else:
+            warning_message = (
+                f"Claude CLI did not return a session id during {pair_name}:{phase_name}; "
+                "future phases will start a new conversation unless one becomes available."
+            )
+        warn(warning_message)
+        append_runtime_raw_log(
+            raw_phase_log,
+            run_id,
+            "session_warning",
+            warning_message,
+            pair=pair_name,
+            phase=phase_name,
+            cycle=cycle_num,
+            attempt=attempt_num,
+        )
+        append_runtime_raw_log(
+            run_raw_phase_log,
+            run_id,
+            "session_warning",
+            warning_message,
+            pair=pair_name,
+            phase=phase_name,
+            cycle=cycle_num,
+            attempt=attempt_num,
+        )
+
+    return stdout
 
 
 def run_codex_phase(
@@ -2390,138 +3108,97 @@ def run_codex_phase(
     prior_phase_ids: Sequence[str] = (),
     prior_phase_keys: Sequence[str] = (),
 ) -> str:
-    session_state = load_session_state(session_file, "persistent")
-    session_state.mode = "persistent"
-    include_request_snapshot = session_state.thread_id is None
-    prompt_payload = build_phase_prompt(
-        cwd=cwd,
-        template_provenance=template_provenance,
-        rendered_template_text=rendered_template_text,
-        request_file=request_file,
-        run_raw_phase_log=run_raw_phase_log,
-        decisions_file=decisions_file,
-        pair_name=pair_name,
-        phase_name=phase_name,
-        cycle_num=cycle_num,
-        attempt_num=attempt_num,
-        run_id=run_id,
-        session_state=session_state,
-        include_request_snapshot=include_request_snapshot,
-        artifact_bundle=artifact_bundle,
-        session_file=session_file,
-        is_fresh_phase_thread=include_request_snapshot and pair_name in PHASED_PAIRS,
-        events_file=events_file,
-        task_dir=task_dir,
+    return run_provider_phase(
+        ProviderRuntime(name="codex", codex_command=codex_command),
+        cwd,
+        template_provenance,
+        rendered_template_text,
+        phase_name,
+        pair_name,
+        cycle_num,
+        attempt_num,
+        run_id,
+        request_file,
+        session_file,
+        artifact_bundle,
+        run_raw_phase_log,
+        raw_phase_log,
+        events_file,
+        task_dir,
+        decisions_file,
         active_phase_selection=active_phase_selection,
         prior_phase_ids=prior_phase_ids,
         prior_phase_keys=prior_phase_keys,
     )
 
-    if session_state.thread_id:
-        command = [*codex_command.resume_command, session_state.thread_id, "-"]
-        command_mode = "resume"
-    else:
-        command = list(codex_command.start_command)
-        command_mode = "start"
 
-    print(f"[*] Spawning {pair_name}:{phase_name} agent...")
-    process = subprocess.run(
-        command,
-        cwd=cwd,
-        input=prompt_payload,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=sys.stderr,
-        encoding="utf-8",
-    )
-
-    raw_exec_output = process.stdout or ""
-    stdout, thread_id = parse_codex_exec_json(raw_exec_output)
-    session_state.thread_id = thread_id or session_state.thread_id
-    session_state.last_used_at = datetime.now(timezone.utc).isoformat()
-    if process.returncode == 0:
-        session_state.pending_clarification_note = None
-    save_session_state(session_file, session_state)
-
-    append_runtime_raw_log(
-        raw_phase_log,
-        run_id,
-        "session_turn",
-        f"mode={command_mode}\ntemplate={template_provenance}",
-        pair=pair_name,
-        phase=phase_name,
-        cycle=cycle_num,
-        attempt=attempt_num,
-        thread_id=session_state.thread_id,
-    )
-    append_runtime_raw_log(
-        run_raw_phase_log,
-        run_id,
-        "session_turn",
-        f"mode={command_mode}\ntemplate={template_provenance}",
-        pair=pair_name,
-        phase=phase_name,
-        cycle=cycle_num,
-        attempt=attempt_num,
-        thread_id=session_state.thread_id,
-    )
-
-    append_raw_phase_log(
-        raw_phase_log,
-        pair_name,
-        phase_name,
-        cycle_num,
-        attempt_num,
-        "codex-agent",
-        stdout,
-        run_id=run_id,
-        thread_id=session_state.thread_id,
-    )
-    append_raw_phase_log(
-        run_raw_phase_log,
-        pair_name,
-        phase_name,
-        cycle_num,
-        attempt_num,
-        "codex-agent",
-        stdout,
-        run_id=run_id,
-        thread_id=session_state.thread_id,
-    )
-
-    if process.returncode == 0 and command_mode == "start" and not thread_id:
-        warning_message = (
-            f"Codex CLI did not return a thread id during {pair_name}:{phase_name}; "
-            "future phases will start a new conversation unless one becomes available."
-        )
-        warn(warning_message)
-        append_runtime_raw_log(
-            raw_phase_log,
+def run_selected_phase(
+    provider_runtime: ProviderRuntime,
+    cwd: Path,
+    template_provenance: str,
+    rendered_template_text: str,
+    phase_name: str,
+    pair_name: str,
+    cycle_num: int,
+    attempt_num: int,
+    run_id: str,
+    request_file: Path,
+    session_file: Path,
+    artifact_bundle: ArtifactBundle,
+    run_raw_phase_log: Path,
+    raw_phase_log: Path,
+    events_file: Path,
+    task_dir: Path,
+    decisions_file: Path,
+    active_phase_selection: Optional[ResolvedPhaseSelection] = None,
+    prior_phase_ids: Sequence[str] = (),
+    prior_phase_keys: Sequence[str] = (),
+) -> str:
+    if provider_runtime.name == "codex" and provider_runtime.codex_command is not None:
+        return run_codex_phase(
+            provider_runtime.codex_command,
+            cwd,
+            template_provenance,
+            rendered_template_text,
+            phase_name,
+            pair_name,
+            cycle_num,
+            attempt_num,
             run_id,
-            "session_warning",
-            warning_message,
-            pair=pair_name,
-            phase=phase_name,
-            cycle=cycle_num,
-            attempt=attempt_num,
-        )
-        append_runtime_raw_log(
+            request_file,
+            session_file,
+            artifact_bundle,
             run_raw_phase_log,
-            run_id,
-            "session_warning",
-            warning_message,
-            pair=pair_name,
-            phase=phase_name,
-            cycle=cycle_num,
-            attempt=attempt_num,
+            raw_phase_log,
+            events_file,
+            task_dir,
+            decisions_file,
+            active_phase_selection=active_phase_selection,
+            prior_phase_ids=prior_phase_ids,
+            prior_phase_keys=prior_phase_keys,
         )
-
-    if process.returncode != 0:
-        diagnostic = stdout.strip() or raw_exec_output.strip()
-        if diagnostic:
-            print(diagnostic.rstrip(), file=sys.stderr)
-        fatal(f"\n[!] Codex CLI failed during {pair_name}:{phase_name} with exit code {process.returncode}.")
-    return stdout
+    return run_provider_phase(
+        provider_runtime,
+        cwd,
+        template_provenance,
+        rendered_template_text,
+        phase_name,
+        pair_name,
+        cycle_num,
+        attempt_num,
+        run_id,
+        request_file,
+        session_file,
+        artifact_bundle,
+        run_raw_phase_log,
+        raw_phase_log,
+        events_file,
+        task_dir,
+        decisions_file,
+        active_phase_selection=active_phase_selection,
+        prior_phase_ids=prior_phase_ids,
+        prior_phase_keys=prior_phase_keys,
+    )
 
 @dataclass(frozen=True)
 class PhaseControlDecision:
@@ -2570,7 +3247,7 @@ def retry_phase_after_parse_error(
     paths: Dict[str, Path],
     recorder: EventRecorder,
     active_phase_selection: Optional[ResolvedPhaseSelection],
-    codex_command: CodexCommandConfig,
+    provider_runtime: ProviderRuntime,
     root: Path,
     template_provenance: str,
     template_text: str,
@@ -2602,8 +3279,8 @@ def retry_phase_after_parse_error(
         attempt=attempt_num,
     )
     set_pending_session_note(session_file, feedback_note)
-    retry_stdout = run_codex_phase(
-        codex_command,
+    retry_stdout = run_selected_phase(
+        provider_runtime,
         root,
         template_provenance,
         template_text,
@@ -2712,30 +3389,51 @@ def ask_human(question_text: str) -> str:
         print("Please provide an answer, or type 'skip'.")
 
 
-def auto_answer_question(codex_command: CodexCommandConfig, root: Path, request_file: Path, raw_phase_log: Path, question: str) -> str:
+def auto_answer_question(
+    provider_runtime: ProviderRuntime,
+    root: Path,
+    request_file: Path,
+    run_raw_phase_log: Path,
+    task_raw_phase_log: Path,
+    run_id: str,
+    question: str,
+    *,
+    pair: str,
+    phase: str,
+    cycle: int,
+    attempt: int,
+) -> str:
     request_text = request_file.read_text(encoding="utf-8").strip()
     prompt = (
         "You are assisting a autoloop orchestrator.\n"
         "Answer the question using repository context and existing requirements.\n"
         "If uncertain, provide the safest explicit assumption.\n"
         f"The immutable request snapshot is at {request_file}.\n"
-        f"The authoritative chronological raw log is at {raw_phase_log}.\n"
+        f"The authoritative chronological raw log is at {run_raw_phase_log}.\n"
         "Return plain text only.\n\n"
         f"Question:\n{question}\n\n"
         f"Request snapshot:\n{request_text if request_text else DEFAULT_REQUEST_TEXT}\n"
     )
-    process = subprocess.run(
-        codex_command.start_command,
-        cwd=root,
-        input=prompt,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=sys.stderr,
-        encoding="utf-8",
-    )
-    if process.returncode != 0:
-        fatal(f"[!] Auto-answer pass failed with exit code {process.returncode}.")
-    answer, _thread_id = parse_codex_exec_json(process.stdout or "")
+    try:
+        turn_result = execute_provider_turn(
+            provider_runtime,
+            cwd=root,
+            prompt=prompt,
+            session_id=None,
+        )
+    except ProviderExecutionError as exc:
+        log_provider_failure_and_fatal(
+            provider_runtime=provider_runtime,
+            error=exc,
+            raw_logs=(task_raw_phase_log, run_raw_phase_log),
+            run_id=run_id,
+            context="auto_answer",
+            pair=pair,
+            phase=phase,
+            cycle=cycle,
+            attempt=attempt,
+        )
+    answer = turn_result.stdout
     answer = answer.strip()
     if not answer:
         return "[Auto-answer failed to produce content]"
@@ -3108,7 +3806,8 @@ def execute_pair_cycles(
     artifact_bundle: ArtifactBundle,
     session_file: Path,
     root: Path,
-    codex_command: CodexCommandConfig,
+    provider_runtime: Optional[ProviderRuntime] = None,
+    codex_command: Optional[CodexCommandConfig] = None,
     run_id: str,
     run_paths: Dict[str, Path],
     paths: Dict[str, Path],
@@ -3123,6 +3822,10 @@ def execute_pair_cycles(
     prior_phase_ids: Sequence[str] = (),
     prior_phase_keys: Sequence[str] = (),
 ) -> Tuple[str, int]:
+    if provider_runtime is None:
+        if codex_command is None:
+            fatal("[!] FATAL: execute_pair_cycles requires a provider runtime.")
+        provider_runtime = ProviderRuntime(name="codex", codex_command=codex_command)
     print(f"\n===== Pair: {PAIR_LABELS[pair]} =====")
     producer_template_provenance, producer_template_text = rendered_pair_template(pair, "producer", task_root_rel)
     verifier_template_provenance, verifier_template_text = rendered_pair_template(pair, "verifier", task_root_rel)
@@ -3183,8 +3886,8 @@ def execute_pair_cycles(
         producer_baseline = phase_snapshot_ref(root) if use_git else None
 
         try:
-            producer_stdout = run_codex_phase(
-                codex_command,
+            producer_stdout = run_selected_phase(
+                provider_runtime,
                 root,
                 producer_template_provenance,
                 producer_template_text,
@@ -3241,7 +3944,7 @@ def execute_pair_cycles(
                 paths=paths,
                 recorder=recorder,
                 active_phase_selection=active_phase_selection,
-                codex_command=codex_command,
+                provider_runtime=provider_runtime,
                 root=root,
                 template_provenance=producer_template_provenance,
                 template_text=producer_template_text,
@@ -3275,7 +3978,19 @@ def execute_pair_cycles(
             recorder.emit("question", pair=pair, phase="producer", cycle=cycle_num, attempt=attempt_num)
             producer_question = format_question(producer_control)
             if args.full_auto_answers:
-                answer = auto_answer_question(codex_command, root, run_paths["request_file"], run_paths["raw_phase_log"], producer_question)
+                answer = auto_answer_question(
+                    provider_runtime,
+                    root,
+                    run_paths["request_file"],
+                    run_paths["raw_phase_log"],
+                    paths["raw_phase_log"],
+                    run_id,
+                    producer_question,
+                    pair=pair,
+                    phase="producer",
+                    cycle=cycle_num,
+                    attempt=attempt_num,
+                )
                 print(f"[+] Auto-answered producer question: {answer}")
                 answer_source = "auto"
             else:
@@ -3316,8 +4031,8 @@ def execute_pair_cycles(
 
         verifier_baseline = phase_snapshot_ref(root) if use_git else None
 
-        verifier_stdout = run_codex_phase(
-            codex_command,
+        verifier_stdout = run_selected_phase(
+            provider_runtime,
             root,
             verifier_template_provenance,
             verifier_template_text,
@@ -3364,7 +4079,7 @@ def execute_pair_cycles(
                 paths=paths,
                 recorder=recorder,
                 active_phase_selection=active_phase_selection,
-                codex_command=codex_command,
+                provider_runtime=provider_runtime,
                 root=root,
                 template_provenance=verifier_template_provenance,
                 template_text=verifier_template_text,
@@ -3393,7 +4108,19 @@ def execute_pair_cycles(
             recorder.emit("question", pair=pair, phase="verifier", cycle=cycle_num, attempt=attempt_num)
             verifier_question = format_question(verifier_control)
             if args.full_auto_answers:
-                answer = auto_answer_question(codex_command, root, run_paths["request_file"], run_paths["raw_phase_log"], verifier_question)
+                answer = auto_answer_question(
+                    provider_runtime,
+                    root,
+                    run_paths["request_file"],
+                    run_paths["raw_phase_log"],
+                    paths["raw_phase_log"],
+                    run_id,
+                    verifier_question,
+                    pair=pair,
+                    phase="verifier",
+                    cycle=cycle_num,
+                    attempt=attempt_num,
+                )
                 print(f"[+] Auto-answered verifier question: {answer}")
                 answer_source = "auto"
             else:
@@ -3475,7 +4202,7 @@ def execute_pair_cycles(
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Autoloop: optional strategy-to-execution Codex loop orchestration")
+    parser = argparse.ArgumentParser(description="Autoloop: protocol-driven multi-provider repository orchestration")
     parser.add_argument("--pairs", type=str, default=None, help="Comma list from: plan,implement,test")
     parser.add_argument("--phase-id", type=str, help="Explicit phase id for implement/test execution when phase_plan.yaml exists")
     parser.add_argument(
@@ -3485,8 +4212,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Phase targeting mode for implement/test execution",
     )
     parser.add_argument("--max-iterations", type=int, default=None, help="Maximum verifier cycles per enabled pair")
-    parser.add_argument("--model", type=str, default=None, help="Codex model override")
-    parser.add_argument("--model-effort", type=str, default=None, help="Codex model effort override")
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help="Codex model override (applies when provider.name resolves to codex)",
+    )
+    parser.add_argument(
+        "--model-effort",
+        type=str,
+        default=None,
+        help="Codex model effort override (applies when provider.name resolves to codex)",
+    )
     parser.add_argument("--workspace", type=str, default=".", help="Repository/workspace root")
     parser.add_argument("--intent", type=str, help="Optional initial product intent text")
     parser.add_argument("--task-id", type=str, help="Task workspace id/slug under .autoloop/tasks")
@@ -3503,7 +4240,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--full-auto-answers",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="Auto-answer agent questions using an extra Codex pass",
+        help="Auto-answer agent questions using an extra turn from the active provider",
     )
     git_group = parser.add_mutually_exclusive_group()
     git_group.add_argument(
@@ -3585,10 +4322,13 @@ def main() -> int:
     if use_git and not shutil.which("git"):
         warn("git is not installed; forcing --no-git mode.")
         use_git = False
-    check_dependencies(require_git=use_git)
+    if runtime_config.provider.name == "codex":
+        check_dependencies(require_git=use_git)
+    else:
+        check_dependencies(provider_name=runtime_config.provider.name, require_git=use_git)
     if args.run_id and not args.resume:
         fatal("[!] FATAL: --run-id requires --resume.")
-    codex_command = resolve_codex_exec_command(runtime_config.provider)
+    provider_runtime = resolve_provider_runtime(runtime_config.provider)
     pair_configs = parse_pairs(args.pairs, args.max_iterations)
     enabled_pairs = [p.name for p in pair_configs if p.enabled]
 
@@ -3633,18 +4373,33 @@ def main() -> int:
         resume_checkpoint = load_resume_checkpoint(run_paths["events_file"], enabled_pairs)
         recorder = EventRecorder(run_id=run_id, events_file=run_paths["events_file"], sequence=resume_checkpoint.last_sequence)
         if run_paths["plan_session_file"].exists():
-            session_state = load_session_state(run_paths["plan_session_file"], "persistent")
+            session_state = load_session_state(
+                run_paths["plan_session_file"],
+                "persistent",
+                default_provider=runtime_config.provider.name,
+            )
+            ensure_session_provider_match(session_state, runtime_config.provider.name, context=f"resume run {run_id}")
             session_state.mode = "persistent"
         else:
             session_state = SessionState(
                 mode="persistent",
+                provider=runtime_config.provider.name,
                 thread_id=None,
+                provider_metadata={},
                 pending_clarification_note=None,
                 created_at=datetime.now(timezone.utc).isoformat(),
             )
             save_session_state(run_paths["plan_session_file"], session_state)
-        if not session_state.thread_id:
-            session_notice = "No stored Codex thread id is available; resuming with a new conversation for the next phase."
+        if not session_state.session_id:
+            if runtime_config.provider.name == "codex":
+                session_notice = (
+                    "No stored Codex thread id is available; resuming with a new conversation for the next phase."
+                )
+            else:
+                session_notice = (
+                    f"No stored {runtime_config.provider.name.capitalize()} session id is available; "
+                    "resuming with a new conversation for the next phase."
+                )
             warn(session_notice)
             append_runtime_notice(
                 paths["raw_phase_log"],
@@ -3656,9 +4411,19 @@ def main() -> int:
             save_session_state(run_paths["plan_session_file"], session_state)
     else:
         run_id = create_run_id()
-        run_paths = create_run_paths(paths["runs_dir"], run_id, resolved_request_text, session_mode="persistent")
+        run_paths = create_run_paths(
+            paths["runs_dir"],
+            run_id,
+            resolved_request_text,
+            session_mode="persistent",
+            provider_name=runtime_config.provider.name,
+        )
         recorder = EventRecorder(run_id=run_id, events_file=run_paths["events_file"])
-        session_state = load_session_state(run_paths["plan_session_file"], "persistent")
+        session_state = load_session_state(
+            run_paths["plan_session_file"],
+            "persistent",
+            default_provider=runtime_config.provider.name,
+        )
     run_status = "running"
 
     if use_git and not args.resume:
@@ -3747,7 +4512,7 @@ def main() -> int:
                 artifact_bundle=plan_bundle,
                 session_file=run_paths["plan_session_file"],
                 root=root,
-                codex_command=codex_command,
+                provider_runtime=provider_runtime,
                 run_id=run_id,
                 run_paths=run_paths,
                 paths=paths,
@@ -3871,7 +4636,7 @@ def main() -> int:
                         ),
                         session_file=resolve_session_file(pair, current_phase_selection, run_paths["run_dir"]),
                         root=root,
-                        codex_command=codex_command,
+                        provider_runtime=provider_runtime,
                         run_id=run_id,
                         run_paths=run_paths,
                         paths=paths,
