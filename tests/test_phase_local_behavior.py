@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from loop_control import criteria_all_checked
-from superloop import (
+from autoloop.loop_control import criteria_all_checked
+from autoloop.autoloop import (
     ArtifactBundle,
     PHASE_MODE_SINGLE,
     PhasePlan,
@@ -31,7 +31,7 @@ from superloop import (
     resolve_artifact_bundle,
     resolve_session_file,
     remove_trailing_empty_decisions_block,
-    tracked_superloop_paths,
+    tracked_autoloop_paths,
     verifier_scope_violations,
 )
 
@@ -175,15 +175,15 @@ def test_decisions_header_parsing_and_sequence_allocation(tmp_path: Path):
     decisions = tmp_path / "decisions.txt"
     decisions.write_text(
         (
-            '<superloop-decisions-header version="1" block_seq="3" owner="planner" phase_id="task-global" '
+            '<autoloop-decisions-header version="1" block_seq="3" owner="planner" phase_id="task-global" '
             'pair="plan" turn_seq="2" run_id="run-1" ts="2026-03-22T00:00:00+00:00" />\n'
             "Keep plan scope narrow\n"
-            '<superloop-decisions-header version="1" block_seq="4" owner="runtime" phase_id="task-global" '
+            '<autoloop-decisions-header version="1" block_seq="4" owner="runtime" phase_id="task-global" '
             'pair="plan" turn_seq="2" run_id="run-1" ts="2026-03-22T00:01:00+00:00" entry="questions" qa_seq="7" />\n'
             "Is rollback needed?\n"
-            '<superloop-decisions-header version="1" block_seq="5" owner="implementer" phase_id="phase-a" '
+            '<autoloop-decisions-header version="1" block_seq="5" owner="implementer" phase_id="phase-a" '
             'pair="implement" turn_seq="1" run_id="run-1" ts="2026-03-22T00:02:00+00:00" />\n'
-            "Centralize sequence allocation in superloop.py\n"
+            "Centralize sequence allocation in autoloop.py\n"
         ),
         encoding="utf-8",
     )
@@ -192,12 +192,30 @@ def test_decisions_header_parsing_and_sequence_allocation(tmp_path: Path):
     assert len(blocks) == 3
     assert blocks[0].attrs["owner"] == "planner"
     assert blocks[1].attrs["entry"] == "questions"
-    assert blocks[2].body == "Centralize sequence allocation in superloop.py\n"
+    assert blocks[2].body == "Centralize sequence allocation in autoloop.py\n"
     assert next_decisions_block_seq(decisions) == 6
     assert next_decisions_qa_seq(decisions) == 8
     assert next_decisions_turn_seq(decisions, run_id="run-1", pair="plan", phase_id="task-global") == 3
     assert next_decisions_turn_seq(decisions, run_id="run-1", pair="implement", phase_id="phase-a") == 2
     assert next_decisions_turn_seq(decisions, run_id="run-2", pair="plan", phase_id="task-global") == 1
+
+
+def test_parse_decisions_headers_accepts_legacy_prefix(tmp_path: Path):
+    decisions = tmp_path / "decisions.txt"
+    decisions.write_text(
+        (
+            '<superloop-decisions-header version="1" block_seq="1" owner="planner" phase_id="task-global" '
+            'pair="plan" turn_seq="1" run_id="run-1" ts="2026-03-22T00:00:00+00:00" />\n'
+            "Preserve legacy parsing\n"
+        ),
+        encoding="utf-8",
+    )
+
+    blocks = parse_decisions_headers(decisions.read_text(encoding="utf-8"))
+
+    assert len(blocks) == 1
+    assert blocks[0].attrs["owner"] == "planner"
+    assert blocks[0].body == "Preserve legacy parsing\n"
 
 
 def test_clarification_extraction_and_status_lines(tmp_path: Path):
@@ -231,7 +249,7 @@ def test_prompt_bootstrap_only_for_fresh_phase_thread(tmp_path: Path):
     bundle = ArtifactBundle(
         pair="implement",
         scope="phase-local",
-        artifact_dir=tmp_path / ".superloop" / "tasks" / "task" / "implement" / "phases" / "phase-b",
+        artifact_dir=tmp_path / ".autoloop" / "tasks" / "task" / "implement" / "phases" / "phase-b",
         criteria_file=tmp_path / "criteria.md",
         feedback_file=tmp_path / "feedback.md",
         artifact_files={
@@ -239,12 +257,12 @@ def test_prompt_bootstrap_only_for_fresh_phase_thread(tmp_path: Path):
             "feedback.md": tmp_path / "feedback.md",
             "implementation_notes.md": tmp_path / "implementation_notes.md",
         },
-        allowed_verifier_prefixes=(".superloop/tasks/t/implement/phases/phase-a/",),
+        allowed_verifier_prefixes=(".autoloop/tasks/t/implement/phases/phase-a/",),
         phase_id="phase-b",
         phase_dir_key="phase-b",
         phase_title="Phase B",
     )
-    task_dir = tmp_path / ".superloop" / "tasks" / "task"
+    task_dir = tmp_path / ".autoloop" / "tasks" / "task"
     prior_phase_dir = task_dir / "implement" / "phases" / "phase-a"
     prior_phase_dir.mkdir(parents=True, exist_ok=True)
     (prior_phase_dir / "implementation_notes.md").write_text("Prior notes\n", encoding="utf-8")
@@ -312,7 +330,7 @@ def test_prompt_bootstrap_only_for_fresh_phase_thread(tmp_path: Path):
     assert f"AUTHORITATIVE SHARED DECISIONS FILE: {decisions}" in fresh
     assert "phase-a: phase_started" in fresh
     assert "phase-a: phase_completed" in fresh
-    assert ".superloop/tasks/task/implement/phases/phase-a/implementation_notes.md" in fresh
+    assert ".autoloop/tasks/task/implement/phases/phase-a/implementation_notes.md" in fresh
     assert "session.json" not in fresh
     assert fresh.count("ACTIVE PHASE EXECUTION CONTRACT:") == 1
     assert "AUTHORITATIVE CLARIFICATIONS TO DATE:" not in resumed
@@ -329,7 +347,7 @@ def test_fresh_phase_bootstrap_does_not_enforce_size_cap(tmp_path: Path):
     decisions.write_text("", encoding="utf-8")
     events = tmp_path / "events.jsonl"
     events.write_text("", encoding="utf-8")
-    task_dir = tmp_path / ".superloop" / "tasks" / "task"
+    task_dir = tmp_path / ".autoloop" / "tasks" / "task"
     bundle = ArtifactBundle(
         pair="implement",
         scope="phase-local",
@@ -337,7 +355,7 @@ def test_fresh_phase_bootstrap_does_not_enforce_size_cap(tmp_path: Path):
         criteria_file=tmp_path / "criteria.md",
         feedback_file=tmp_path / "feedback.md",
         artifact_files={"implementation_notes.md": tmp_path / "implementation_notes.md"},
-        allowed_verifier_prefixes=(".superloop/tasks/task/implement/phases/phase-b/",),
+        allowed_verifier_prefixes=(".autoloop/tasks/task/implement/phases/phase-b/",),
         phase_id="phase-b",
         phase_dir_key="phase-b",
         phase_title="Phase B",
@@ -372,50 +390,50 @@ def test_verifier_scope_phase_local_allows_active_phase_only():
     bundle = ArtifactBundle(
         pair="implement",
         scope="phase-local",
-        artifact_dir=Path(".superloop/tasks/task/implement/phases/a"),
+        artifact_dir=Path(".autoloop/tasks/task/implement/phases/a"),
         criteria_file=Path("x"),
         feedback_file=Path("y"),
         artifact_files={},
-        allowed_verifier_prefixes=(".superloop/tasks/task/implement/phases/a/",),
+        allowed_verifier_prefixes=(".autoloop/tasks/task/implement/phases/a/",),
         phase_id="a",
         phase_dir_key="a",
         phase_title="A",
     )
     delta = {
-        ".superloop/tasks/task/implement/phases/a/criteria.md",
-        ".superloop/tasks/task/implement/phases/b/criteria.md",
-        ".superloop/tasks/task/runs/run-1/events.jsonl",
-        ".superloop/tasks/task/raw_phase_log.md",
-        ".superloop/tasks/task/decisions.txt",
+        ".autoloop/tasks/task/implement/phases/a/criteria.md",
+        ".autoloop/tasks/task/implement/phases/b/criteria.md",
+        ".autoloop/tasks/task/runs/run-1/events.jsonl",
+        ".autoloop/tasks/task/raw_phase_log.md",
+        ".autoloop/tasks/task/decisions.txt",
     }
-    violations = verifier_scope_violations(bundle, delta, ".superloop/tasks/task")
+    violations = verifier_scope_violations(bundle, delta, ".autoloop/tasks/task")
     assert violations == [
-        ".superloop/tasks/task/decisions.txt",
-        ".superloop/tasks/task/implement/phases/b/criteria.md",
+        ".autoloop/tasks/task/decisions.txt",
+        ".autoloop/tasks/task/implement/phases/b/criteria.md",
     ]
 
 
-def test_tracked_superloop_paths_for_test_pair_excludes_runs_and_keeps_shared_artifacts():
-    tracked = tracked_superloop_paths(".superloop/tasks/task", "test")
+def test_tracked_autoloop_paths_for_test_pair_excludes_runs_and_keeps_shared_artifacts():
+    tracked = tracked_autoloop_paths(".autoloop/tasks/task", "test")
 
-    assert ".superloop/tasks/task/decisions.txt" in tracked
-    assert ".superloop/tasks/task/test/" in tracked
-    assert ".superloop/tasks/task/runs/" not in tracked
+    assert ".autoloop/tasks/task/decisions.txt" in tracked
+    assert ".autoloop/tasks/task/test/" in tracked
+    assert ".autoloop/tasks/task/runs/" not in tracked
     assert not any(path.endswith("run_log.md") or path.endswith("summary.md") for path in tracked)
 
 
 def test_filter_volatile_task_run_paths_keeps_non_run_phase_artifacts():
     paths = {
-        ".superloop/tasks/task/runs/run-1/events.jsonl",
-        ".superloop/tasks/task/implement/phases/phase-a/implementation_notes.md",
-        ".superloop/tasks/task/test/phases/phase-a/test_strategy.md",
+        ".autoloop/tasks/task/runs/run-1/events.jsonl",
+        ".autoloop/tasks/task/implement/phases/phase-a/implementation_notes.md",
+        ".autoloop/tasks/task/test/phases/phase-a/test_strategy.md",
     }
 
-    filtered = filter_volatile_task_run_paths(paths, ".superloop/tasks/task")
+    filtered = filter_volatile_task_run_paths(paths, ".autoloop/tasks/task")
 
     assert filtered == {
-        ".superloop/tasks/task/implement/phases/phase-a/implementation_notes.md",
-        ".superloop/tasks/task/test/phases/phase-a/test_strategy.md",
+        ".autoloop/tasks/task/implement/phases/phase-a/implementation_notes.md",
+        ".autoloop/tasks/task/test/phases/phase-a/test_strategy.md",
     }
 
 
@@ -423,10 +441,10 @@ def test_remove_trailing_empty_decisions_block_truncates_utf8_safely(tmp_path: P
     decisions = tmp_path / "decisions.txt"
     decisions.write_text(
         (
-            '<superloop-decisions-header version="1" block_seq="1" owner="planner" '
+            '<autoloop-decisions-header version="1" block_seq="1" owner="planner" '
             'phase_id="task-global" pair="plan" turn_seq="1" run_id="run-1" ts="2026-03-22T00:00:00+00:00" />\n'
             "Keep café behavior stable\n"
-            '<superloop-decisions-header version="1" block_seq="2" owner="planner" '
+            '<autoloop-decisions-header version="1" block_seq="2" owner="planner" '
             'phase_id="task-global" pair="plan" turn_seq="2" run_id="run-1" ts="2026-03-22T00:01:00+00:00" />\n'
         ),
         encoding="utf-8",

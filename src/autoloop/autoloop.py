@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Superloop: strategy-to-execution multi-pair Codex orchestration.
+"""Autoloop: strategy-to-execution multi-pair Codex orchestration.
 
 Implements optional producer/verifier loops using the shared Doc-Loop loop-control
 contract, with canonical <loop-control> JSON output and legacy tag compatibility.
@@ -11,6 +11,7 @@ import argparse
 import hashlib
 import html
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -28,7 +29,7 @@ try:
 except ImportError:  # pragma: no cover - exercised in environments without optional deps installed
     yaml = None
 
-from loop_control import (
+from .loop_control import (
     LoopControl,
     LoopControlParseError,
     PROMISE_BLOCKED,
@@ -81,8 +82,13 @@ DEFAULT_PHASE_MODE = PHASE_MODE_SINGLE
 DEFAULT_INTENT_MODE = "preserve"
 DEFAULT_FULL_AUTO_ANSWERS = False
 DEFAULT_NO_GIT = False
-SUPERLOOP_CONFIG_FILENAMES = ("superloop.yaml", "superloop.config")
-TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
+PACKAGE_DIR = Path(__file__).resolve().parent
+STATE_DIRNAME = ".autoloop"
+LEGACY_STATE_DIRNAME = ".superloop"
+PRIMARY_CONFIG_FILENAMES = ("autoloop.yaml", "autoloop.config")
+LEGACY_CONFIG_FILENAMES = ("superloop.yaml", "superloop.config")
+CONFIG_FILENAMES = (*PRIMARY_CONFIG_FILENAMES, *LEGACY_CONFIG_FILENAMES)
+TEMPLATES_DIR = PACKAGE_DIR / "templates"
 PAIR_TEMPLATE_FILES = {
     "plan": {"producer": "plan_producer.md", "verifier": "plan_verifier.md", "criteria": "plan_criteria.md"},
     "implement": {
@@ -92,7 +98,9 @@ PAIR_TEMPLATE_FILES = {
     },
     "test": {"producer": "test_producer.md", "verifier": "test_verifier.md", "criteria": "test_criteria.md"},
 }
-DECISIONS_HEADER_PREFIX = "<superloop-decisions-header "
+DECISIONS_HEADER_PREFIX = "<autoloop-decisions-header "
+LEGACY_DECISIONS_HEADER_PREFIX = "<superloop-decisions-header "
+DECISIONS_HEADER_PREFIXES = (DECISIONS_HEADER_PREFIX, LEGACY_DECISIONS_HEADER_PREFIX)
 DECISIONS_HEADER_SUFFIX = " />"
 DECISIONS_VERSION = "1"
 PLAN_DECISIONS_PHASE_ID = "task-global"
@@ -181,13 +189,13 @@ class RuntimeConfigOverride:
 
 
 @dataclass(frozen=True)
-class SuperloopConfigOverride:
+class AutoloopConfigOverride:
     provider: ProviderConfigOverride = ProviderConfigOverride()
     runtime: RuntimeConfigOverride = RuntimeConfigOverride()
 
 
 @dataclass(frozen=True)
-class ResolvedSuperloopConfig:
+class ResolvedAutoloopConfig:
     provider: ProviderConfig
     runtime: RuntimeConfig
 
@@ -322,7 +330,7 @@ class PhasePlanError(ValueError):
 
 
 class ConfigError(ValueError):
-    """Raised when Superloop configuration is invalid or cannot be loaded."""
+    """Raised when Autoloop configuration is invalid or cannot be loaded."""
 
 
 def fatal(message: str, exit_code: int = 1):
@@ -377,7 +385,7 @@ def parse_decisions_headers(text: str) -> List[DecisionsBlock]:
     offset = 0
     for line in lines:
         stripped = line.rstrip("\r\n")
-        if stripped.startswith(DECISIONS_HEADER_PREFIX) and stripped.endswith("/>"):
+        if any(stripped.startswith(prefix) for prefix in DECISIONS_HEADER_PREFIXES) and stripped.endswith("/>"):
             attrs = {
                 match.group(1): html.unescape(match.group(2))
                 for match in re.finditer(r'([a-z_]+)="([^"]*)"', stripped)
@@ -672,13 +680,59 @@ def parse_status_paths(status_text: str) -> Set[str]:
     return changed
 
 
-def superloop_repo_root() -> Path:
-    return Path(__file__).resolve().parent
+def package_root() -> Path:
+    return PACKAGE_DIR
+
+
+def user_config_dir() -> Path:
+    xdg_config_home = os.environ.get("XDG_CONFIG_HOME")
+    if xdg_config_home:
+        return Path(xdg_config_home).expanduser() / "autoloop"
+    return Path.home() / ".config" / "autoloop"
+
+
+def state_root(root: Path, dirname: str) -> Path:
+    return root / dirname
+
+
+def primary_state_root(root: Path) -> Path:
+    return state_root(root, STATE_DIRNAME)
+
+
+def legacy_state_root(root: Path) -> Path:
+    return state_root(root, LEGACY_STATE_DIRNAME)
+
+
+def resolve_resume_state_root(root: Path, *, task_id: Optional[str] = None, run_id: Optional[str] = None) -> Path:
+    primary_tasks = primary_state_root(root) / "tasks"
+    legacy_tasks = legacy_state_root(root) / "tasks"
+    if run_id:
+        primary_run_task = task_id_for_run(primary_tasks, run_id)
+        if primary_run_task is not None and (task_id is None or primary_run_task == task_id):
+            return primary_state_root(root)
+
+        legacy_run_task = task_id_for_run(legacy_tasks, run_id)
+        if legacy_run_task is not None and (task_id is None or legacy_run_task == task_id):
+            warn(f"Resuming from legacy state root {LEGACY_STATE_DIRNAME}; new runs will use {STATE_DIRNAME}.")
+            return legacy_state_root(root)
+
+    if task_id and (primary_tasks / task_id).is_dir():
+        return primary_state_root(root)
+    if task_id and (legacy_tasks / task_id).is_dir():
+        warn(f"Resuming from legacy state root {LEGACY_STATE_DIRNAME}; new runs will use {STATE_DIRNAME}.")
+        return legacy_state_root(root)
+    if latest_task_id(primary_tasks) is not None:
+        return primary_state_root(root)
+    if latest_task_id(legacy_tasks) is not None:
+        warn(f"Resuming from legacy state root {LEGACY_STATE_DIRNAME}; new runs will use {STATE_DIRNAME}.")
+        return legacy_state_root(root)
+
+    return primary_state_root(root)
 
 
 def discover_config_file(directory: Path) -> Optional[Path]:
     matches: List[Path] = []
-    for filename in SUPERLOOP_CONFIG_FILENAMES:
+    for filename in CONFIG_FILENAMES:
         candidate = directory / filename
         if not candidate.exists():
             continue
@@ -693,7 +747,7 @@ def discover_config_file(directory: Path) -> Optional[Path]:
     return matches[0] if matches else None
 
 
-def load_superloop_config(path: Path) -> object:
+def load_autoloop_config(path: Path) -> object:
     if yaml is None:
         raise ConfigError(
             f"{path} cannot be loaded without PyYAML installed. Install dependencies from requirements.txt."
@@ -734,7 +788,7 @@ def _format_unknown_keys(keys: Iterable[object]) -> str:
     return ", ".join(sorted(str(key) for key in keys))
 
 
-def parse_superloop_config(payload: object, source: Path) -> SuperloopConfigOverride:
+def parse_autoloop_config(payload: object, source: Path) -> AutoloopConfigOverride:
     if not isinstance(payload, dict):
         raise ConfigError(f"{source}: configuration must be a YAML mapping.")
 
@@ -780,7 +834,7 @@ def parse_superloop_config(payload: object, source: Path) -> SuperloopConfigOver
         no_git=_optional_config_bool(runtime_payload.get("no_git"), "runtime.no_git", source),
     )
 
-    return SuperloopConfigOverride(
+    return AutoloopConfigOverride(
         provider=provider,
         runtime=runtime,
     )
@@ -856,23 +910,22 @@ def _merge_runtime_config(*layers: RuntimeConfigOverride, args: argparse.Namespa
     )
 
 
-def resolve_runtime_config(root: Path, args: argparse.Namespace) -> ResolvedSuperloopConfig:
-    program_root = superloop_repo_root()
-    global_config_path = discover_config_file(program_root)
-    local_config_path = discover_config_file(root) if root != program_root else None
+def resolve_runtime_config(root: Path, args: argparse.Namespace) -> ResolvedAutoloopConfig:
+    global_config_path = discover_config_file(user_config_dir())
+    local_config_path = discover_config_file(root)
 
     global_override = (
-        parse_superloop_config(load_superloop_config(global_config_path), global_config_path)
+        parse_autoloop_config(load_autoloop_config(global_config_path), global_config_path)
         if global_config_path is not None
-        else SuperloopConfigOverride()
+        else AutoloopConfigOverride()
     )
     local_override = (
-        parse_superloop_config(load_superloop_config(local_config_path), local_config_path)
+        parse_autoloop_config(load_autoloop_config(local_config_path), local_config_path)
         if local_config_path is not None
-        else SuperloopConfigOverride()
+        else AutoloopConfigOverride()
     )
 
-    return ResolvedSuperloopConfig(
+    return ResolvedAutoloopConfig(
         provider=_merge_provider_config(
             global_override.provider,
             local_override.provider,
@@ -901,7 +954,7 @@ def phase_snapshot_ref(cwd: Path, tracked_paths: Optional[Sequence[str]] = None)
     """Returns a git snapshot reference plus untracked-file baseline."""
     untracked = frozenset(list_untracked_paths(cwd, tracked_paths=tracked_paths))
 
-    snap = run_git(["stash", "create", "superloop-phase-snapshot"], cwd=cwd, allow_fail=True).stdout.strip()
+    snap = run_git(["stash", "create", "autoloop-phase-snapshot"], cwd=cwd, allow_fail=True).stdout.strip()
     if snap:
         return PhaseSnapshot(ref=snap, untracked_paths=untracked)
 
@@ -936,8 +989,8 @@ def allowed_verifier_paths(bundle: ArtifactBundle, task_root: str) -> List[str]:
     return list(bundle.allowed_verifier_prefixes)
 
 
-def tracked_superloop_artifact_paths(task_root: str) -> List[str]:
-    """Returns repo-relative task-scoped artifacts that Superloop tracks and may stage."""
+def tracked_autoloop_artifact_paths(task_root: str) -> List[str]:
+    """Returns repo-relative task-scoped artifacts that Autoloop tracks and may stage."""
     return [
         f"{task_root}/task.json",
         f"{task_root}/raw_phase_log.md",
@@ -980,9 +1033,9 @@ def verifier_scope_violations(bundle: ArtifactBundle | str, verifier_delta: Set[
     )
 
 
-def tracked_superloop_paths(task_root: str, pair: Optional[str] = None) -> List[str]:
-    """Returns paths that Superloop may stage/commit."""
-    shared_paths = tracked_superloop_artifact_paths(task_root)
+def tracked_autoloop_paths(task_root: str, pair: Optional[str] = None) -> List[str]:
+    """Returns paths that Autoloop may stage/commit."""
+    shared_paths = tracked_autoloop_artifact_paths(task_root)
     if pair is None:
         pair_paths = [f"{task_root}/{name}/" for name in PAIR_ORDER]
     else:
@@ -1660,7 +1713,7 @@ def resolve_codex_exec_command(provider: ProviderConfig | str) -> CodexCommandCo
     supports_resume_model_effort = "--model-effort" in resume_text
 
     if not supports_json or not supports_resume_json:
-        fatal("[!] FATAL CODEX ERROR: This Superloop version requires `codex exec` and `codex exec resume` support for --json.")
+        fatal("[!] FATAL CODEX ERROR: This Autoloop version requires `codex exec` and `codex exec resume` support for --json.")
 
     provider_args = ["--model", model]
     if model_effort is not None:
@@ -1712,7 +1765,7 @@ def resolve_codex_exec_command(provider: ProviderConfig | str) -> CodexCommandCo
         )
 
     fatal(
-        "[!] FATAL CODEX ERROR: This Superloop version requires `codex exec` support for "
+        "[!] FATAL CODEX ERROR: This Autoloop version requires `codex exec` support for "
         "either --dangerously-bypass-approvals-and-sandbox or --full-auto."
     )
 
@@ -1759,7 +1812,7 @@ def _truncate_slug(slug: str, max_length: int) -> str:
 
 
 def render_task_prompt(template: str, task_root_rel: str) -> str:
-    return template.replace(".superloop/", f"{task_root_rel}/")
+    return template.replace(".autoloop/", f"{task_root_rel}/")
 
 
 def _phase_metadata_block(task_id: str, pair: str, phase_id: str, phase_title: str, scope: str) -> str:
@@ -1857,13 +1910,14 @@ def ensure_workspace(
     task_id: str,
     product_intent: Optional[str],
     intent_mode: str,
+    state_dir: Optional[Path] = None,
 ) -> Dict[str, Path]:
     _producer_prompts, _verifier_prompts, criteria_templates = load_pair_templates()
 
-    super_dir = root / ".superloop"
-    super_dir.mkdir(parents=True, exist_ok=True)
+    resolved_state_dir = state_dir or primary_state_root(root)
+    resolved_state_dir.mkdir(parents=True, exist_ok=True)
 
-    tasks_dir = super_dir / "tasks"
+    tasks_dir = resolved_state_dir / "tasks"
     tasks_dir.mkdir(parents=True, exist_ok=True)
 
     task_dir = tasks_dir / task_id
@@ -1872,7 +1926,7 @@ def ensure_workspace(
 
     raw_phase_log = task_dir / "raw_phase_log.md"
     if not raw_phase_log.exists():
-        raw_phase_log.write_text("# Superloop Raw Phase Log\n", encoding="utf-8")
+        raw_phase_log.write_text("# Autoloop Raw Phase Log\n", encoding="utf-8")
 
     shared_decisions_file = decisions_file(task_dir)
     if not shared_decisions_file.exists():
@@ -1926,7 +1980,7 @@ def ensure_workspace(
             (pair_dir / "phases").mkdir(parents=True, exist_ok=True)
 
     return {
-        "super_dir": super_dir,
+        "state_dir": resolved_state_dir,
         "tasks_dir": tasks_dir,
         "task_dir": task_dir,
         "task_meta_file": task_meta_file,
@@ -1950,7 +2004,7 @@ def create_run_paths(runs_dir: Path, run_id: str, request_text: Optional[str], s
     run_dir.mkdir(parents=True, exist_ok=True)
 
     raw_phase_log = run_dir / "raw_phase_log.md"
-    raw_phase_log.write_text(f"# Superloop Raw Phase Log ({run_id})\n", encoding="utf-8")
+    raw_phase_log.write_text(f"# Autoloop Raw Phase Log ({run_id})\n", encoding="utf-8")
 
     events_file = run_dir / "events.jsonl"
     events_file.write_text("", encoding="utf-8")
@@ -1990,7 +2044,7 @@ def open_existing_run_paths(
     plan_state_file = plan_session_file(run_dir)
 
     if not raw_phase_log.exists():
-        raw_phase_log.write_text(f"# Superloop Raw Phase Log ({run_id})\n", encoding="utf-8")
+        raw_phase_log.write_text(f"# Autoloop Raw Phase Log ({run_id})\n", encoding="utf-8")
     if not events_file.exists():
         events_file.write_text("", encoding="utf-8")
     sessions_dir.mkdir(parents=True, exist_ok=True)
@@ -2647,7 +2701,7 @@ def ask_human(question_text: str) -> str:
 def auto_answer_question(codex_command: CodexCommandConfig, root: Path, request_file: Path, raw_phase_log: Path, question: str) -> str:
     request_text = request_file.read_text(encoding="utf-8").strip()
     prompt = (
-        "You are assisting a superloop orchestrator.\n"
+        "You are assisting a autoloop orchestrator.\n"
         "Answer the question using repository context and existing requirements.\n"
         "If uncertain, provide the safest explicit assumption.\n"
         f"The immutable request snapshot is at {request_file}.\n"
@@ -2965,7 +3019,7 @@ def resolve_task_id(task_id: Optional[str], intent: Optional[str]) -> str:
         return slugify_task(task_id)
     if intent:
         return derive_intent_task_id(intent)
-    fatal("[!] FATAL: Provide --task-id or --intent so Superloop can select a task workspace.")
+    fatal("[!] FATAL: Provide --task-id or --intent so Autoloop can select a task workspace.")
 
 
 def load_phase_plan_or_fatal(task_dir: Path, task_id: str) -> Optional[PhasePlan]:
@@ -3094,9 +3148,9 @@ def execute_pair_cycles(
             attempt=attempt_num,
             phase_id=active_phase_selection.phase_ids[0] if active_phase_selection else None,
         )
-        pair_tracked = tracked_superloop_paths(task_root_rel, pair)
+        pair_tracked = tracked_autoloop_paths(task_root_rel, pair)
         if use_git:
-            commit_tracked_changes(root, f"superloop: pre-cycle snapshot ({pair} #{cycle_num})", pair_tracked)
+            commit_tracked_changes(root, f"autoloop: pre-cycle snapshot ({pair} #{cycle_num})", pair_tracked)
 
         producer_turn_seq = next_decisions_turn_seq(
             paths["decisions_file"],
@@ -3230,7 +3284,7 @@ def execute_pair_cycles(
                 turn_seq=producer_turn_seq,
             )
             if use_git:
-                commit_tracked_changes(root, f"superloop: answered producer question ({pair} #{cycle_num})", pair_tracked)
+                commit_tracked_changes(root, f"autoloop: answered producer question ({pair} #{cycle_num})", pair_tracked)
             continue
 
         if producer_decision.action == "ignore_promise":
@@ -3239,7 +3293,7 @@ def execute_pair_cycles(
             )
 
         if use_git and producer_delta:
-            commit_paths(root, f"superloop: producer edits ({pair} #{cycle_num})", producer_delta)
+            commit_paths(root, f"autoloop: producer edits ({pair} #{cycle_num})", producer_delta)
         else:
             if use_git:
                 print("[-] Producer made no changes.")
@@ -3347,7 +3401,7 @@ def execute_pair_cycles(
                 answer_source,
             )
             if use_git:
-                commit_tracked_changes(root, f"superloop: answered verifier question ({pair} #{cycle_num})", pair_tracked)
+                commit_tracked_changes(root, f"autoloop: answered verifier question ({pair} #{cycle_num})", pair_tracked)
             continue
 
         violations = verifier_scope_violations(artifact_bundle, verifier_delta, task_root_rel) if use_git else []
@@ -3382,18 +3436,18 @@ def execute_pair_cycles(
                 phase_id=active_phase_selection.phase_ids[0] if active_phase_selection else None,
             )
             if use_git:
-                commit_paths(root, f"superloop: pair complete ({pair})", set(pair_tracked) | verifier_delta)
+                commit_paths(root, f"autoloop: pair complete ({pair})", set(pair_tracked) | verifier_delta)
             return "complete", 0
 
         if verifier_decision.action == "blocked":
             recorder.emit("blocked", pair=pair, cycle=cycle_num, attempt=attempt_num)
             if use_git:
-                commit_paths(root, f"superloop: blocked ({pair} #{cycle_num})", set(pair_tracked) | verifier_delta)
+                commit_paths(root, f"autoloop: blocked ({pair} #{cycle_num})", set(pair_tracked) | verifier_delta)
             print(f"[BLOCKED] Pair `{pair}` emitted BLOCKED.", file=sys.stderr)
             return "blocked", 2
 
         if use_git:
-            commit_paths(root, f"superloop: verifier feedback ({pair} #{cycle_num})", verifier_delta)
+            commit_paths(root, f"autoloop: verifier feedback ({pair} #{cycle_num})", verifier_delta)
         else:
             print("[-] Change detection skipped in --no-git mode.")
         cycle += 1
@@ -3401,13 +3455,13 @@ def execute_pair_cycles(
 
     recorder.emit("pair_failed", pair=pair)
     if use_git:
-        commit_paths(root, f"superloop: failed ({pair} max iterations)", pair_tracked)
+        commit_paths(root, f"autoloop: failed ({pair} max iterations)", pair_tracked)
     print(f"[FAILED] Pair `{pair}` reached max iterations without COMPLETE.", file=sys.stderr)
     return "failed", 1
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Superloop: optional strategy-to-execution Codex loop orchestration")
+    parser = argparse.ArgumentParser(description="Autoloop: optional strategy-to-execution Codex loop orchestration")
     parser.add_argument("--pairs", type=str, default=None, help="Comma list from: plan,implement,test")
     parser.add_argument("--phase-id", type=str, help="Explicit phase id for implement/test execution when phase_plan.yaml exists")
     parser.add_argument(
@@ -3421,7 +3475,7 @@ def main() -> int:
     parser.add_argument("--model-effort", type=str, default=None, help="Codex model effort override")
     parser.add_argument("--workspace", type=str, default=".", help="Repository/workspace root")
     parser.add_argument("--intent", type=str, help="Optional initial product intent text")
-    parser.add_argument("--task-id", type=str, help="Task workspace id/slug under .superloop/tasks")
+    parser.add_argument("--task-id", type=str, help="Task workspace id/slug under .autoloop/tasks")
     parser.add_argument(
         "--intent-mode",
         choices=["replace", "append", "preserve"],
@@ -3429,8 +3483,8 @@ def main() -> int:
         help="How --intent updates an existing task context",
     )
     parser.add_argument("--resume", action="store_true", help="Resume from an existing task/run state")
-    parser.add_argument("--run-id", type=str, help="Run ID under .superloop/tasks/<task-id>/runs")
-    parser.add_argument("--list-tasks", action="store_true", help="List existing .superloop task IDs and exit")
+    parser.add_argument("--run-id", type=str, help="Run ID under .autoloop/tasks/<task-id>/runs")
+    parser.add_argument("--list-tasks", action="store_true", help="List existing .autoloop task IDs and exit")
     parser.add_argument(
         "--full-auto-answers",
         action=argparse.BooleanOptionalAction,
@@ -3449,8 +3503,10 @@ def main() -> int:
     if not root.exists() or not root.is_dir():
         fatal(f"[!] FATAL: --workspace must be an existing directory: {root}")
 
+    resume_state_dir = resolve_resume_state_root(root, task_id=slugify_task(args.task_id) if args.task_id else None, run_id=args.run_id) if (args.resume or args.list_tasks) else primary_state_root(root)
+
     if args.list_tasks:
-        tasks = list_tasks(root / ".superloop" / "tasks")
+        tasks = list_tasks(resume_state_dir / "tasks")
         if tasks:
             for task in tasks:
                 print(task)
@@ -3458,7 +3514,7 @@ def main() -> int:
             print("(no tasks found)")
         return 0
 
-    tasks_dir = root / ".superloop" / "tasks"
+    tasks_dir = resume_state_dir / "tasks"
 
     if args.resume:
         if args.task_id:
@@ -3506,14 +3562,15 @@ def main() -> int:
         if not repo_exists:
             print("[*] Initializing local Git repository...")
             run_git(["init"], cwd=root)
-            run_git(["config", "user.name", "Superloop Agent"], cwd=root)
-            run_git(["config", "user.email", "superloop@localhost"], cwd=root)
+            run_git(["config", "user.name", "Autoloop Agent"], cwd=root)
+            run_git(["config", "user.email", "autoloop@localhost"], cwd=root)
 
         ensure_git_commit_ready(root)
-    paths = ensure_workspace(root, task_id, args.intent, args.intent_mode)
+    active_state_dir = resume_state_dir if args.resume else primary_state_root(root)
+    paths = ensure_workspace(root, task_id, args.intent, args.intent_mode, state_dir=active_state_dir)
     enforce_phase_parser_preconditions(task_dir=paths["task_dir"], enabled_pairs=enabled_pairs)
     task_root_rel = str(paths["task_root_rel"])
-    task_scoped_paths = tracked_superloop_paths(task_root_rel)
+    task_scoped_paths = tracked_autoloop_paths(task_root_rel)
     resolved_request_text = task_request_text(paths["task_meta_file"], paths["legacy_context_file"])
     resume_checkpoint: Optional[ResumeCheckpoint] = None
     session_state: Optional[SessionState] = None
@@ -3570,9 +3627,9 @@ def main() -> int:
     run_status = "running"
 
     if use_git and not args.resume:
-        commit_tracked_changes(root, "superloop: baseline", task_scoped_paths)
+        commit_tracked_changes(root, "autoloop: baseline", task_scoped_paths)
 
-    print("\n[+] Starting Superloop")
+    print("\n[+] Starting Autoloop")
     print(f"[*] Workspace root: {root}")
     print(f"[*] Task ID: {task_id}")
     print(f"[*] Task root: {task_root_rel}")
@@ -3856,7 +3913,7 @@ def main() -> int:
                 )
 
         if use_git:
-            commit_tracked_changes(root, "superloop: successful completion", task_scoped_paths)
+            commit_tracked_changes(root, "autoloop: successful completion", task_scoped_paths)
         print("\n[SUCCESS] All enabled pairs completed.")
         run_status = "success"
         exit_code = 0
@@ -3881,7 +3938,7 @@ def main() -> int:
             if use_git:
                 try_commit_tracked_changes(
                     root,
-                    f"superloop: finalize run artifacts ({run_status})",
+                    f"autoloop: finalize run artifacts ({run_status})",
                     task_scoped_paths,
                 )
 

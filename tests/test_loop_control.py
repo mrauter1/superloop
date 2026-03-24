@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from loop_control import (
+from autoloop.loop_control import (
     LoopControlParseError,
     LoopQuestion,
     PROMISE_BLOCKED,
@@ -12,7 +12,7 @@ from loop_control import (
     PROMISE_INCOMPLETE,
     parse_loop_control,
 )
-from superloop import decide_producer_control, decide_verifier_control as decide_superloop_verifier_control
+from autoloop.autoloop import decide_producer_control, decide_verifier_control as decide_autoloop_verifier_control
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "loop_control"
 
@@ -101,7 +101,7 @@ def test_parse_loop_control_no_signal_fixture():
     assert control.raw_payload is None
 
 
-def test_superloop_producer_promise_without_question_is_ignored():
+def test_autoloop_producer_promise_without_question_is_ignored():
     control = parse_loop_control(fixture_text("legacy_promise_only.txt"))
 
     decision = decide_producer_control(control)
@@ -109,7 +109,7 @@ def test_superloop_producer_promise_without_question_is_ignored():
     assert decision.action == "ignore_promise"
 
 
-def test_superloop_producer_question_still_wins_over_final_line_legacy_promise():
+def test_autoloop_producer_question_still_wins_over_final_line_legacy_promise():
     control = parse_loop_control(fixture_text("legacy_question_and_promise.txt"))
 
     decision = decide_producer_control(control)
@@ -117,19 +117,19 @@ def test_superloop_producer_question_still_wins_over_final_line_legacy_promise()
     assert decision.action == "question"
 
 
-def test_superloop_missing_verifier_promise_defaults_to_incomplete_with_warning():
+def test_autoloop_missing_verifier_promise_defaults_to_incomplete_with_warning():
     control = parse_loop_control(fixture_text("no_control.txt"))
 
-    decision = decide_superloop_verifier_control(control, criteria_checked=True)
+    decision = decide_autoloop_verifier_control(control, criteria_checked=True)
 
     assert decision.action == "incomplete"
     assert decision.warning == "No promise tag found, defaulted to <promise>INCOMPLETE</promise>."
 
 
-def test_superloop_complete_with_unchecked_criteria_is_downgraded():
+def test_autoloop_complete_with_unchecked_criteria_is_downgraded():
     control = parse_loop_control(fixture_text("canonical_promise_complete.txt"))
 
-    decision = decide_superloop_verifier_control(control, criteria_checked=False)
+    decision = decide_autoloop_verifier_control(control, criteria_checked=False)
 
     assert decision.action == "incomplete"
     assert decision.warning == "verifier emitted COMPLETE with unchecked criteria; downgrading to INCOMPLETE in lax guard mode."

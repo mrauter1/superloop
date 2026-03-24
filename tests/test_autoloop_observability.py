@@ -6,10 +6,10 @@ import subprocess
 from pathlib import Path
 
 import pytest
-import superloop
+import autoloop.autoloop as autoloop
 
-from loop_control import LoopQuestion
-from superloop import (
+from autoloop.loop_control import LoopQuestion
+from autoloop.autoloop import (
     CodexCommandConfig,
     ConfigError,
     EventRecorder,
@@ -59,7 +59,7 @@ def install_fake_yaml(monkeypatch):
         def safe_load(text: str):
             return json.loads(text)
 
-    monkeypatch.setattr(superloop, "yaml", FakeYaml)
+    monkeypatch.setattr(autoloop, "yaml", FakeYaml)
 
 
 def write_phase_plan(path: Path, task_id: str, *, phases: list[dict[str, object]] | None = None):
@@ -87,23 +87,30 @@ def write_phase_plan(path: Path, task_id: str, *, phases: list[dict[str, object]
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
-def write_superloop_config(path: Path, payload: dict[str, object]):
+def write_autoloop_config(path: Path, payload: dict[str, object]):
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
 def test_discover_config_file_rejects_same_directory_ambiguity(tmp_path: Path):
     import pytest
 
-    (tmp_path / "superloop.yaml").write_text("{}", encoding="utf-8")
-    (tmp_path / "superloop.config").write_text("{}", encoding="utf-8")
+    (tmp_path / "autoloop.yaml").write_text("{}", encoding="utf-8")
+    (tmp_path / "autoloop.config").write_text("{}", encoding="utf-8")
 
     with pytest.raises(ConfigError, match="multiple configuration files"):
         discover_config_file(tmp_path)
 
 
+def test_discover_config_file_accepts_single_legacy_filename(tmp_path: Path):
+    legacy = tmp_path / "superloop.yaml"
+    legacy.write_text("{}", encoding="utf-8")
+
+    assert discover_config_file(tmp_path) == legacy
+
+
 def test_resolve_runtime_config_uses_builtins_when_no_config_and_yaml_missing(tmp_path: Path, monkeypatch):
-    monkeypatch.setattr(superloop, "yaml", None)
-    monkeypatch.setattr(superloop, "superloop_repo_root", lambda: tmp_path / "global")
+    monkeypatch.setattr(autoloop, "yaml", None)
+    monkeypatch.setattr(autoloop, "user_config_dir", lambda: tmp_path / "global")
 
     resolved = resolve_runtime_config(
         tmp_path / "workspace",
@@ -127,17 +134,17 @@ def test_resolve_runtime_config_applies_global_local_and_cli_precedence(tmp_path
     workspace_root = tmp_path / "workspace"
     global_root.mkdir()
     workspace_root.mkdir()
-    monkeypatch.setattr(superloop, "superloop_repo_root", lambda: global_root)
+    monkeypatch.setattr(autoloop, "user_config_dir", lambda: global_root)
 
-    write_superloop_config(
-        global_root / "superloop.yaml",
+    write_autoloop_config(
+        global_root / "autoloop.yaml",
         {
             "provider": {"model": "gpt-global", "model_effort": "medium"},
             "runtime": {"max_iterations": 9, "phase_mode": "up-to", "no_git": True},
         },
     )
-    write_superloop_config(
-        workspace_root / "superloop.config",
+    write_autoloop_config(
+        workspace_root / "autoloop.config",
         {"provider": {"model": "gpt-local"}, "runtime": {"max_iterations": 3, "no_git": False}},
     )
 
@@ -165,9 +172,9 @@ def test_resolve_runtime_config_rejects_invalid_runtime_values(tmp_path: Path, m
     install_fake_yaml(monkeypatch)
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
-    monkeypatch.setattr(superloop, "superloop_repo_root", lambda: tmp_path / "global")
-    write_superloop_config(
-        workspace_root / "superloop.yaml",
+    monkeypatch.setattr(autoloop, "user_config_dir", lambda: tmp_path / "global")
+    write_autoloop_config(
+        workspace_root / "autoloop.yaml",
         {"runtime": {"max_iterations": 0}},
     )
 
@@ -180,9 +187,9 @@ def test_resolve_runtime_config_requires_yaml_when_config_present(tmp_path: Path
 
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
-    monkeypatch.setattr(superloop, "yaml", None)
-    monkeypatch.setattr(superloop, "superloop_repo_root", lambda: tmp_path / "global")
-    (workspace_root / "superloop.yaml").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(autoloop, "yaml", None)
+    monkeypatch.setattr(autoloop, "user_config_dir", lambda: tmp_path / "global")
+    (workspace_root / "autoloop.yaml").write_text("{}", encoding="utf-8")
 
     with pytest.raises(ConfigError, match="PyYAML"):
         resolve_runtime_config(workspace_root, argparse.Namespace(model=None, model_effort=None))
@@ -194,9 +201,9 @@ def test_resolve_runtime_config_rejects_unknown_provider_keys(tmp_path: Path, mo
     install_fake_yaml(monkeypatch)
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
-    monkeypatch.setattr(superloop, "superloop_repo_root", lambda: tmp_path / "global")
-    write_superloop_config(
-        workspace_root / "superloop.yaml",
+    monkeypatch.setattr(autoloop, "user_config_dir", lambda: tmp_path / "global")
+    write_autoloop_config(
+        workspace_root / "autoloop.yaml",
         {"provider": {"temperature": "1"}},
     )
 
@@ -210,9 +217,9 @@ def test_resolve_runtime_config_rejects_unknown_top_level_keys(tmp_path: Path, m
     install_fake_yaml(monkeypatch)
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
-    monkeypatch.setattr(superloop, "superloop_repo_root", lambda: tmp_path / "global")
-    write_superloop_config(
-        workspace_root / "superloop.yaml",
+    monkeypatch.setattr(autoloop, "user_config_dir", lambda: tmp_path / "global")
+    write_autoloop_config(
+        workspace_root / "autoloop.yaml",
         {"unexpected": {"model": "gpt-test"}},
     )
 
@@ -226,9 +233,9 @@ def test_resolve_runtime_config_rejects_non_string_top_level_key(tmp_path: Path,
     install_fake_yaml(monkeypatch)
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
-    monkeypatch.setattr(superloop, "superloop_repo_root", lambda: tmp_path / "global")
-    write_superloop_config(
-        workspace_root / "superloop.yaml",
+    monkeypatch.setattr(autoloop, "user_config_dir", lambda: tmp_path / "global")
+    write_autoloop_config(
+        workspace_root / "autoloop.yaml",
         {"provider": {"model": "gpt-test"}, 1: "x"},
     )
 
@@ -242,9 +249,9 @@ def test_resolve_runtime_config_rejects_non_string_runtime_key(tmp_path: Path, m
     install_fake_yaml(monkeypatch)
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
-    monkeypatch.setattr(superloop, "superloop_repo_root", lambda: tmp_path / "global")
-    write_superloop_config(
-        workspace_root / "superloop.yaml",
+    monkeypatch.setattr(autoloop, "user_config_dir", lambda: tmp_path / "global")
+    write_autoloop_config(
+        workspace_root / "autoloop.yaml",
         {"runtime": {1: "x"}},
     )
 
@@ -258,8 +265,8 @@ def test_resolve_runtime_config_rejects_malformed_yaml(tmp_path: Path, monkeypat
     install_fake_yaml(monkeypatch)
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
-    monkeypatch.setattr(superloop, "superloop_repo_root", lambda: tmp_path / "global")
-    (workspace_root / "superloop.yaml").write_text("{not-json", encoding="utf-8")
+    monkeypatch.setattr(autoloop, "user_config_dir", lambda: tmp_path / "global")
+    (workspace_root / "autoloop.yaml").write_text("{not-json", encoding="utf-8")
 
     with pytest.raises(ConfigError, match="could not be parsed as YAML"):
         resolve_runtime_config(workspace_root, argparse.Namespace(model=None, model_effort=None))
@@ -286,7 +293,7 @@ def test_resolve_codex_exec_command_includes_model_effort_when_supported(monkeyp
             )
         raise AssertionError(cmd)
 
-    monkeypatch.setattr(superloop.subprocess, "run", fake_run)
+    monkeypatch.setattr(autoloop.subprocess, "run", fake_run)
 
     command = resolve_codex_exec_command(ProviderConfig(model="gpt-test", model_effort="high"))
 
@@ -307,7 +314,7 @@ def test_resolve_codex_exec_command_omits_model_effort_when_unset(monkeypatch):
             return subprocess.CompletedProcess(cmd, 0, stdout="--json", stderr="")
         raise AssertionError(cmd)
 
-    monkeypatch.setattr(superloop.subprocess, "run", fake_run)
+    monkeypatch.setattr(autoloop.subprocess, "run", fake_run)
 
     command = resolve_codex_exec_command(ProviderConfig(model="gpt-test"))
 
@@ -325,7 +332,7 @@ def test_resolve_codex_exec_command_rejects_unsupported_model_effort(monkeypatch
             return subprocess.CompletedProcess(cmd, 0, stdout="--json", stderr="")
         raise AssertionError(cmd)
 
-    monkeypatch.setattr(superloop.subprocess, "run", fake_run)
+    monkeypatch.setattr(autoloop.subprocess, "run", fake_run)
 
     with pytest.raises(SystemExit):
         resolve_codex_exec_command(ProviderConfig(model="gpt-test", model_effort="high"))
@@ -337,38 +344,38 @@ def test_main_resolves_provider_config_before_codex_command(tmp_path: Path, monk
     global_root = tmp_path / "global"
     workspace_root.mkdir()
     global_root.mkdir()
-    monkeypatch.setattr(superloop, "superloop_repo_root", lambda: global_root)
-    write_superloop_config(
-        global_root / "superloop.yaml",
+    monkeypatch.setattr(autoloop, "user_config_dir", lambda: global_root)
+    write_autoloop_config(
+        global_root / "autoloop.yaml",
         {"provider": {"model": "gpt-global", "model_effort": "medium"}},
     )
-    write_superloop_config(
-        workspace_root / "superloop.config",
+    write_autoloop_config(
+        workspace_root / "autoloop.config",
         {"provider": {"model": "gpt-local"}},
     )
 
     captured: list[ProviderConfig] = []
-    control = superloop.LoopControl(
+    control = autoloop.LoopControl(
         question=None,
-        promise=superloop.PROMISE_COMPLETE,
+        promise=autoloop.PROMISE_COMPLETE,
         source="canonical",
         raw_payload=None,
     )
 
-    monkeypatch.setattr(superloop, "check_dependencies", lambda require_git=True: None)
+    monkeypatch.setattr(autoloop, "check_dependencies", lambda require_git=True: None)
     monkeypatch.setattr(
-        superloop,
+        autoloop,
         "resolve_codex_exec_command",
         lambda provider: captured.append(provider) or fake_codex_command(),
     )
-    monkeypatch.setattr(superloop, "run_codex_phase", lambda *args, **kwargs: "<loop-control></loop-control>")
-    monkeypatch.setattr(superloop, "parse_phase_control", lambda *args, **kwargs: control)
-    monkeypatch.setattr(superloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(autoloop, "run_codex_phase", lambda *args, **kwargs: "<loop-control></loop-control>")
+    monkeypatch.setattr(autoloop, "parse_phase_control", lambda *args, **kwargs: control)
+    monkeypatch.setattr(autoloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(
-        superloop.sys,
+        autoloop.sys,
         "argv",
         [
-            "superloop.py",
+            "autoloop.py",
             "--workspace",
             str(workspace_root),
             "--pairs",
@@ -383,7 +390,7 @@ def test_main_resolves_provider_config_before_codex_command(tmp_path: Path, monk
         ],
     )
 
-    exit_code = superloop.main()
+    exit_code = autoloop.main()
 
     assert exit_code == 0
     assert captured == [ProviderConfig(model="gpt-local", model_effort="high")]
@@ -410,7 +417,7 @@ def test_append_runtime_notice_writes_only_task_and_run_raw_logs(tmp_path: Path)
     task_raw_phase_log.write_text("# task raw\n", encoding="utf-8")
     run_raw_phase_log.write_text("# run raw\n", encoding="utf-8")
 
-    superloop.append_runtime_notice(
+    autoloop.append_runtime_notice(
         task_raw_phase_log,
         run_raw_phase_log,
         "run-123",
@@ -444,7 +451,7 @@ def test_ensure_phase_plan_scaffold_writes_runtime_metadata_after_request_snapsh
     assert plan_path == phase_plan_file(paths["task_dir"])
     payload = json.loads(plan_path.read_text(encoding="utf-8"))
     assert payload == {
-        "version": superloop.PHASE_PLAN_VERSION,
+        "version": autoloop.PHASE_PLAN_VERSION,
         "task_id": "phase-plan-task",
         "request_snapshot_ref": str(run_paths["request_file"]),
         "phases": [],
@@ -516,8 +523,8 @@ def test_load_resume_checkpoint_skips_completed_pairs_and_continues_cycle(tmp_pa
 def test_validate_phase_plan_rejects_duplicate_phase_ids_after_normalization():
     import pytest
 
-    with pytest.raises(superloop.PhasePlanError):
-        superloop.validate_phase_plan(
+    with pytest.raises(autoloop.PhasePlanError):
+        autoloop.validate_phase_plan(
             {
                 "version": 1,
                 "task_id": "dup-phase-task",
@@ -556,7 +563,7 @@ def test_validate_phase_plan_rejects_duplicate_phase_ids_after_normalization():
 
 
 def test_validate_phase_plan_defaults_optional_lists_when_omitted():
-    plan = superloop.validate_phase_plan(
+    plan = autoloop.validate_phase_plan(
         {
             "version": 1,
             "task_id": "optional-phase-task",
@@ -586,8 +593,8 @@ def test_validate_phase_plan_defaults_optional_lists_when_omitted():
 def test_validate_phase_plan_still_rejects_missing_required_lists():
     import pytest
 
-    with pytest.raises(superloop.PhasePlanError, match=r"phases\[1\]\.in_scope must be a list\."):
-        superloop.validate_phase_plan(
+    with pytest.raises(autoloop.PhasePlanError, match=r"phases\[1\]\.in_scope must be a list\."):
+        autoloop.validate_phase_plan(
             {
                 "version": 1,
                 "task_id": "required-phase-task",
@@ -605,8 +612,8 @@ def test_validate_phase_plan_still_rejects_missing_required_lists():
             "required-phase-task",
         )
 
-    with pytest.raises(superloop.PhasePlanError, match=r"phases\[1\]\.deliverables must be a list\."):
-        superloop.validate_phase_plan(
+    with pytest.raises(autoloop.PhasePlanError, match=r"phases\[1\]\.deliverables must be a list\."):
+        autoloop.validate_phase_plan(
             {
                 "version": 1,
                 "task_id": "required-phase-task",
@@ -628,8 +635,8 @@ def test_validate_phase_plan_still_rejects_missing_required_lists():
 def test_validate_phase_plan_still_requires_non_empty_required_lists():
     import pytest
 
-    with pytest.raises(superloop.PhasePlanError, match=r"phases\[1\]\.deliverables must be a non-empty list\."):
-        superloop.validate_phase_plan(
+    with pytest.raises(autoloop.PhasePlanError, match=r"phases\[1\]\.deliverables must be a non-empty list\."):
+        autoloop.validate_phase_plan(
             {
                 "version": 1,
                 "task_id": "required-phase-task",
@@ -648,8 +655,8 @@ def test_validate_phase_plan_still_requires_non_empty_required_lists():
             "required-phase-task",
         )
 
-    with pytest.raises(superloop.PhasePlanError, match=r"phases\[1\]\.in_scope must be a non-empty list\."):
-        superloop.validate_phase_plan(
+    with pytest.raises(autoloop.PhasePlanError, match=r"phases\[1\]\.in_scope must be a non-empty list\."):
+        autoloop.validate_phase_plan(
             {
                 "version": 1,
                 "task_id": "required-phase-task",
@@ -671,19 +678,19 @@ def test_validate_phase_plan_still_requires_non_empty_required_lists():
 
 def test_main_fatal_error_still_writes_terminal_event_without_summary(tmp_path: Path, monkeypatch):
     install_fake_yaml(monkeypatch)
-    monkeypatch.setattr(superloop, "check_dependencies", lambda require_git=True: None)
-    monkeypatch.setattr(superloop, "resolve_codex_exec_command", lambda model: fake_codex_command())
+    monkeypatch.setattr(autoloop, "check_dependencies", lambda require_git=True: None)
+    monkeypatch.setattr(autoloop, "resolve_codex_exec_command", lambda model: fake_codex_command())
     monkeypatch.setattr(
-        superloop,
+        autoloop,
         "run_codex_phase",
         lambda *args, **kwargs: "<loop-control>{not-json}</loop-control>",
     )
 
     monkeypatch.setattr(
-        superloop.sys,
+        autoloop.sys,
         "argv",
         [
-            "superloop.py",
+            "autoloop.py",
             "--workspace",
             str(tmp_path),
             "--pairs",
@@ -696,10 +703,10 @@ def test_main_fatal_error_still_writes_terminal_event_without_summary(tmp_path: 
         ],
     )
 
-    exit_code = superloop.main()
+    exit_code = autoloop.main()
     assert exit_code == 1
 
-    task_root = tmp_path / ".superloop" / "tasks" / "fatal-test"
+    task_root = tmp_path / ".autoloop" / "tasks" / "fatal-test"
     runs_root = task_root / "runs"
     run_dirs = [p for p in runs_root.iterdir() if p.is_dir()]
     assert len(run_dirs) == 1
@@ -723,18 +730,18 @@ def test_try_commit_tracked_changes_warns_and_returns_false_on_commit_failure(tm
         if args[:2] == ["add", "--"]:
             return subprocess.CompletedProcess(["git", *args], 0, "", "")
         if args[:2] == ["status", "--porcelain"]:
-            return subprocess.CompletedProcess(["git", *args], 0, " M .superloop/tasks/t/runs/run/events.jsonl\n", "")
+            return subprocess.CompletedProcess(["git", *args], 0, " M .autoloop/tasks/t/runs/run/events.jsonl\n", "")
         if args[:2] == ["commit", "-m"]:
             return subprocess.CompletedProcess(["git", *args], 1, "", "hook rejected commit")
         raise AssertionError(f"Unexpected git args: {args}")
 
-    monkeypatch.setattr(superloop, "run_git", fake_run_git)
-    monkeypatch.setattr(superloop, "warn", lambda msg: warnings.append(msg))
+    monkeypatch.setattr(autoloop, "run_git", fake_run_git)
+    monkeypatch.setattr(autoloop, "warn", lambda msg: warnings.append(msg))
 
-    committed = superloop.try_commit_tracked_changes(
+    committed = autoloop.try_commit_tracked_changes(
         tmp_path,
-        "superloop: finalize run artifacts (fatal_error)",
-        [".superloop/tasks/t/runs/"],
+        "autoloop: finalize run artifacts (fatal_error)",
+        [".autoloop/tasks/t/runs/"],
     )
 
     assert committed is False
@@ -815,31 +822,31 @@ def test_latest_run_status_skips_malformed_event_lines(tmp_path: Path):
 
 
 def test_verifier_scope_violations_only_ignores_runtime_bookkeeping_artifacts():
-    task_root = ".superloop/tasks/task-1"
+    task_root = ".autoloop/tasks/task-1"
     delta = {
-        ".superloop/tasks/task-1/runs/run-1/events.jsonl",
-        ".superloop/tasks/task-1/raw_phase_log.md",
-        ".superloop/tasks/task-1/decisions.txt",
-        ".superloop/tasks/task-1/implement/notes.md",
-        ".superloop/tasks/task-1/test/output.md",
+        ".autoloop/tasks/task-1/runs/run-1/events.jsonl",
+        ".autoloop/tasks/task-1/raw_phase_log.md",
+        ".autoloop/tasks/task-1/decisions.txt",
+        ".autoloop/tasks/task-1/implement/notes.md",
+        ".autoloop/tasks/task-1/test/output.md",
     }
     assert verifier_scope_violations("implement", delta, task_root) == [
-        ".superloop/tasks/task-1/decisions.txt",
-        ".superloop/tasks/task-1/test/output.md",
+        ".autoloop/tasks/task-1/decisions.txt",
+        ".autoloop/tasks/task-1/test/output.md",
     ]
 
 
 def test_verifier_scope_violations_does_not_ignore_artifact_prefixed_files():
-    task_root = ".superloop/tasks/task-1"
+    task_root = ".autoloop/tasks/task-1"
     delta = {
-        ".superloop/tasks/task-1/task.json.bak",
-        ".superloop/tasks/task-1/runs-backup/log.jsonl",
+        ".autoloop/tasks/task-1/task.json.bak",
+        ".autoloop/tasks/task-1/runs-backup/log.jsonl",
     }
     assert verifier_scope_violations("implement", delta, task_root) == sorted(delta)
 
 def test_main_resume_refuses_terminal_run(tmp_path: Path, monkeypatch):
-    monkeypatch.setattr(superloop, "check_dependencies", lambda require_git=True: None)
-    monkeypatch.setattr(superloop, "resolve_codex_exec_command", lambda model: fake_codex_command())
+    monkeypatch.setattr(autoloop, "check_dependencies", lambda require_git=True: None)
+    monkeypatch.setattr(autoloop, "resolve_codex_exec_command", lambda model: fake_codex_command())
 
     paths = ensure_workspace(
         root=tmp_path,
@@ -852,10 +859,10 @@ def test_main_resume_refuses_terminal_run(tmp_path: Path, monkeypatch):
     recorder.emit("run_finished", status="success")
 
     monkeypatch.setattr(
-        superloop.sys,
+        autoloop.sys,
         "argv",
         [
-            "superloop.py",
+            "autoloop.py",
             "--workspace",
             str(tmp_path),
             "--pairs",
@@ -871,7 +878,7 @@ def test_main_resume_refuses_terminal_run(tmp_path: Path, monkeypatch):
 
     import pytest
     with pytest.raises(SystemExit):
-        superloop.main()
+        autoloop.main()
 
 def test_task_id_for_run_finds_task_containing_run(tmp_path: Path):
     tasks_dir = tmp_path / "tasks"
@@ -880,11 +887,28 @@ def test_task_id_for_run_finds_task_containing_run(tmp_path: Path):
     assert task_id_for_run(tasks_dir, "run-2") == "task-y"
 
 
+def test_resolve_resume_state_root_prefers_explicit_legacy_run_over_primary_task(tmp_path: Path, monkeypatch):
+    warnings: list[str] = []
+    (tmp_path / ".autoloop" / "tasks" / "shared-task").mkdir(parents=True)
+    (tmp_path / ".superloop" / "tasks" / "shared-task" / "runs" / "run-legacy").mkdir(parents=True)
+
+    monkeypatch.setattr(autoloop, "warn", lambda msg: warnings.append(msg))
+
+    resolved = autoloop.resolve_resume_state_root(
+        tmp_path,
+        task_id="shared-task",
+        run_id="run-legacy",
+    )
+
+    assert resolved == tmp_path / ".superloop"
+    assert any(".superloop" in msg for msg in warnings)
+
+
 def test_resolve_task_id_preserves_long_explicit_task_ids():
     intent_a = "Implement refined reflow v1.2 with strict verification and artifact scoping alpha"
     intent_b = "Implement refined reflow v1.2 with strict verification and artifact scoping beta"
-    assert resolve_task_id(intent_a, None) == superloop.slugify_task(intent_a)
-    assert resolve_task_id(intent_b, None) == superloop.slugify_task(intent_b)
+    assert resolve_task_id(intent_a, None) == autoloop.slugify_task(intent_a)
+    assert resolve_task_id(intent_b, None) == autoloop.slugify_task(intent_b)
     assert resolve_task_id(intent_a, None) != resolve_task_id(intent_b, None)
 
 
@@ -936,24 +960,24 @@ def test_resume_accepts_long_explicit_task_id(tmp_path: Path, monkeypatch):
         intent_mode="preserve",
     )
     create_run_paths(paths["runs_dir"], "run-20260316T120000Z-abcdef12", "Long explicit resume request")
-    control = superloop.LoopControl(
+    control = autoloop.LoopControl(
         question=None,
-        promise=superloop.PROMISE_COMPLETE,
+        promise=autoloop.PROMISE_COMPLETE,
         source="canonical",
         raw_payload=None,
     )
 
-    monkeypatch.setattr(superloop, "check_dependencies", lambda require_git=True: None)
-    monkeypatch.setattr(superloop, "resolve_codex_exec_command", lambda model: fake_codex_command())
-    monkeypatch.setattr(superloop, "run_codex_phase", lambda *args, **kwargs: "<loop-control></loop-control>")
-    monkeypatch.setattr(superloop, "parse_phase_control", lambda *args, **kwargs: control)
-    monkeypatch.setattr(superloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(autoloop, "check_dependencies", lambda require_git=True: None)
+    monkeypatch.setattr(autoloop, "resolve_codex_exec_command", lambda model: fake_codex_command())
+    monkeypatch.setattr(autoloop, "run_codex_phase", lambda *args, **kwargs: "<loop-control></loop-control>")
+    monkeypatch.setattr(autoloop, "parse_phase_control", lambda *args, **kwargs: control)
+    monkeypatch.setattr(autoloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
 
     monkeypatch.setattr(
-        superloop.sys,
+        autoloop.sys,
         "argv",
         [
-            "superloop.py",
+            "autoloop.py",
             "--workspace",
             str(tmp_path),
             "--pairs",
@@ -969,7 +993,7 @@ def test_resume_accepts_long_explicit_task_id(tmp_path: Path, monkeypatch):
         ],
     )
 
-    exit_code = superloop.main()
+    exit_code = autoloop.main()
     assert exit_code == 0
 
 
@@ -981,7 +1005,7 @@ def test_ensure_workspace_creates_task_scoped_paths_without_task_local_prompts(t
         intent_mode="replace",
     )
 
-    task_dir = tmp_path / ".superloop" / "tasks" / "my-task"
+    task_dir = tmp_path / ".autoloop" / "tasks" / "my-task"
     assert paths["task_dir"] == task_dir
     assert (task_dir / "task.json").exists()
     assert (task_dir / "decisions.txt").exists()
@@ -1004,15 +1028,15 @@ def test_ensure_workspace_fails_fast_when_prompt_template_missing(tmp_path: Path
 
     templates = tmp_path / "templates"
     templates.mkdir()
-    for pair, role_files in superloop.PAIR_TEMPLATE_FILES.items():
+    for pair, role_files in autoloop.PAIR_TEMPLATE_FILES.items():
         for role in ("producer", "verifier"):
             filename = role_files[role]
             (templates / filename).write_text(f"# {pair} {role}\n", encoding="utf-8")
         (templates / role_files["criteria"]).write_text(f"# {pair} criteria\n", encoding="utf-8")
 
     (templates / "plan_producer.md").unlink()
-    monkeypatch.setattr(superloop, "TEMPLATES_DIR", templates)
-    superloop.load_pair_templates.cache_clear()
+    monkeypatch.setattr(autoloop, "TEMPLATES_DIR", templates)
+    autoloop.load_pair_templates.cache_clear()
 
     with pytest.raises(SystemExit):
         ensure_workspace(
@@ -1021,12 +1045,12 @@ def test_ensure_workspace_fails_fast_when_prompt_template_missing(tmp_path: Path
             product_intent="Implement feature X",
             intent_mode="replace",
         )
-    superloop.load_pair_templates.cache_clear()
+    autoloop.load_pair_templates.cache_clear()
 
 
 def test_ensure_phase_plan_scaffold_restores_runtime_metadata_and_preserves_phases(tmp_path: Path, monkeypatch):
     install_fake_yaml(monkeypatch)
-    task_dir = tmp_path / ".superloop" / "tasks" / "phase-plan-task"
+    task_dir = tmp_path / ".autoloop" / "tasks" / "phase-plan-task"
     (task_dir / "plan").mkdir(parents=True)
     original_phases = [
         {
@@ -1057,7 +1081,7 @@ def test_ensure_phase_plan_scaffold_restores_runtime_metadata_and_preserves_phas
     plan_path = ensure_phase_plan_scaffold(task_dir, "phase-plan-task", request_file)
 
     payload = json.loads(plan_path.read_text(encoding="utf-8"))
-    assert payload["version"] == superloop.PHASE_PLAN_VERSION
+    assert payload["version"] == autoloop.PHASE_PLAN_VERSION
     assert payload["task_id"] == "phase-plan-task"
     assert payload["request_snapshot_ref"] == str(request_file)
     assert payload["phases"] == original_phases
@@ -1065,7 +1089,7 @@ def test_ensure_phase_plan_scaffold_restores_runtime_metadata_and_preserves_phas
 
 def test_load_phase_plan_and_resolve_selection(tmp_path: Path, monkeypatch):
     install_fake_yaml(monkeypatch)
-    task_dir = tmp_path / ".superloop" / "tasks" / "demo-task"
+    task_dir = tmp_path / ".autoloop" / "tasks" / "demo-task"
     (task_dir / "plan").mkdir(parents=True)
     write_phase_plan(
         phase_plan_file(task_dir),
@@ -1120,18 +1144,18 @@ def test_build_phase_prompt_includes_active_phase_contract(tmp_path: Path):
     request_file.write_text("Implement feature X\n", encoding="utf-8")
     decisions_file = tmp_path / "decisions.txt"
     decisions_file.write_text("", encoding="utf-8")
-    selection = superloop.ResolvedPhaseSelection(
+    selection = autoloop.ResolvedPhaseSelection(
         phase_mode="single",
         phase_ids=("phase-1",),
         phases=(
-            superloop.PhasePlanPhase(
+            autoloop.PhasePlanPhase(
                 phase_id="phase-1",
                 title="Phase 1",
                 objective="Deliver phase 1",
                 in_scope=("code path A",),
                 out_of_scope=("future work",),
                 dependencies=("phase-0",),
-                acceptance_criteria=(superloop.PhasePlanCriterion(id="AC-1", text="done"),),
+                acceptance_criteria=(autoloop.PhasePlanCriterion(id="AC-1", text="done"),),
                 deliverables=("code",),
                 risks=(),
                 rollback=(),
@@ -1216,7 +1240,7 @@ def test_run_codex_phase_logs_shared_template_provenance(tmp_path: Path, monkeyp
     events_file = tmp_path / "events.jsonl"
     events_file.write_text("", encoding="utf-8")
     session_file = tmp_path / "session.json"
-    superloop.save_session_state(
+    autoloop.save_session_state(
         session_file,
         SessionState(
             mode="persistent",
@@ -1225,7 +1249,7 @@ def test_run_codex_phase_logs_shared_template_provenance(tmp_path: Path, monkeyp
             created_at="2026-03-18T00:00:00Z",
         ),
     )
-    artifact_bundle = superloop.ArtifactBundle(
+    artifact_bundle = autoloop.ArtifactBundle(
         pair="plan",
         scope="task-global",
         artifact_dir=tmp_path,
@@ -1245,10 +1269,10 @@ def test_run_codex_phase_logs_shared_template_provenance(tmp_path: Path, monkeyp
     def fake_run(*args, **kwargs):
         return subprocess.CompletedProcess(args=args[0], returncode=0, stdout=raw_exec_output)
 
-    monkeypatch.setattr(superloop.subprocess, "run", fake_run)
+    monkeypatch.setattr(autoloop.subprocess, "run", fake_run)
 
-    template_provenance = str(superloop.pair_template_path("plan", "producer"))
-    stdout = superloop.run_codex_phase(
+    template_provenance = str(autoloop.pair_template_path("plan", "producer"))
+    stdout = autoloop.run_codex_phase(
         fake_codex_command(),
         tmp_path,
         template_provenance,
@@ -1275,11 +1299,11 @@ def test_run_codex_phase_logs_shared_template_provenance(tmp_path: Path, monkeyp
     assert "prompt.md" not in run_raw_phase_log.read_text(encoding="utf-8")
 
 
-def test_tracked_superloop_paths_excludes_runs_directory():
-    tracked = superloop.tracked_superloop_paths(".superloop/tasks/task-1", "implement")
-    assert ".superloop/tasks/task-1/runs/" not in tracked
-    assert ".superloop/tasks/task-1/decisions.txt" in tracked
-    assert ".superloop/tasks/task-1/implement/" in tracked
+def test_tracked_autoloop_paths_excludes_runs_directory():
+    tracked = autoloop.tracked_autoloop_paths(".autoloop/tasks/task-1", "implement")
+    assert ".autoloop/tasks/task-1/runs/" not in tracked
+    assert ".autoloop/tasks/task-1/decisions.txt" in tracked
+    assert ".autoloop/tasks/task-1/implement/" in tracked
 
 
 def test_execute_pair_cycles_excludes_run_outputs_from_snapshot_delta_commits(tmp_path: Path, monkeypatch):
@@ -1294,18 +1318,18 @@ def test_execute_pair_cycles_excludes_run_outputs_from_snapshot_delta_commits(tm
     criteria_file.write_text("- [x] done\n", encoding="utf-8")
     feedback_file.write_text("# feedback\n", encoding="utf-8")
 
-    selection = superloop.ResolvedPhaseSelection(
+    selection = autoloop.ResolvedPhaseSelection(
         phase_mode="single",
         phase_ids=("phase-1",),
         phases=(
-            superloop.PhasePlanPhase(
+            autoloop.PhasePlanPhase(
                 phase_id="phase-1",
                 title="Phase 1",
                 objective="Deliver phase 1",
                 in_scope=("code path A",),
                 out_of_scope=(),
                 dependencies=(),
-                acceptance_criteria=(superloop.PhasePlanCriterion(id="AC-1", text="done"),),
+                acceptance_criteria=(autoloop.PhasePlanCriterion(id="AC-1", text="done"),),
                 deliverables=("code",),
                 risks=(),
                 rollback=(),
@@ -1314,7 +1338,7 @@ def test_execute_pair_cycles_excludes_run_outputs_from_snapshot_delta_commits(tm
         ),
         explicit=True,
     )
-    bundle = superloop.ArtifactBundle(
+    bundle = autoloop.ArtifactBundle(
         pair="implement",
         scope="phase-local",
         artifact_dir=phase_dir,
@@ -1327,41 +1351,41 @@ def test_execute_pair_cycles_excludes_run_outputs_from_snapshot_delta_commits(tm
         phase_title="Phase 1",
     )
 
-    producer_control = superloop.LoopControl(question=None, promise=None, source="canonical", raw_payload=None)
-    verifier_control = superloop.LoopControl(
+    producer_control = autoloop.LoopControl(question=None, promise=None, source="canonical", raw_payload=None)
+    verifier_control = autoloop.LoopControl(
         question=None,
-        promise=superloop.PROMISE_COMPLETE,
+        promise=autoloop.PROMISE_COMPLETE,
         source="canonical",
         raw_payload=None,
     )
     parse_results = [producer_control, verifier_control]
     delta_by_snapshot = {
         "producer": {
-            ".superloop/tasks/task-1/runs/run-1/events.jsonl",
+            ".autoloop/tasks/task-1/runs/run-1/events.jsonl",
             "src/feature.py",
         },
         "verifier": {
-            ".superloop/tasks/task-1/implement/phases/phase-1/feedback.md",
+            ".autoloop/tasks/task-1/implement/phases/phase-1/feedback.md",
         },
     }
     committed_paths: list[tuple[str, set[str]]] = []
 
-    monkeypatch.setattr(superloop, "commit_tracked_changes", lambda *args, **kwargs: False)
-    monkeypatch.setattr(superloop, "phase_snapshot_ref", lambda *_args, **_kwargs: "producer" if not committed_paths else "verifier")
+    monkeypatch.setattr(autoloop, "commit_tracked_changes", lambda *args, **kwargs: False)
+    monkeypatch.setattr(autoloop, "phase_snapshot_ref", lambda *_args, **_kwargs: "producer" if not committed_paths else "verifier")
     monkeypatch.setattr(
-        superloop,
+        autoloop,
         "run_codex_phase",
         lambda *args, **kwargs: "<loop-control></loop-control>",
     )
-    monkeypatch.setattr(superloop, "parse_phase_control", lambda *args, **kwargs: parse_results.pop(0))
+    monkeypatch.setattr(autoloop, "parse_phase_control", lambda *args, **kwargs: parse_results.pop(0))
     monkeypatch.setattr(
-        superloop,
+        autoloop,
         "changed_paths_from_snapshot",
         lambda _root, snapshot, tracked_paths=None: set(delta_by_snapshot[snapshot]),
     )
-    monkeypatch.setattr(superloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(autoloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(
-        superloop,
+        autoloop,
         "commit_paths",
         lambda _root, message, paths: committed_paths.append((message, set(paths))) or True,
     )
@@ -1388,15 +1412,15 @@ def test_execute_pair_cycles_excludes_run_outputs_from_snapshot_delta_commits(tm
 
     assert (status, code) == ("complete", 0)
     assert [message for message, _paths in committed_paths] == [
-        "superloop: producer edits (implement #1)",
-        "superloop: pair complete (implement)",
+        "autoloop: producer edits (implement #1)",
+        "autoloop: pair complete (implement)",
     ]
     assert all(
-        not any(path.startswith(".superloop/tasks/task-1/runs/") for path in paths)
+        not any(path.startswith(".autoloop/tasks/task-1/runs/") for path in paths)
         for _message, paths in committed_paths
     )
     assert "src/feature.py" in committed_paths[0][1]
-    assert ".superloop/tasks/task-1/implement/phases/phase-1/feedback.md" in committed_paths[1][1]
+    assert ".autoloop/tasks/task-1/implement/phases/phase-1/feedback.md" in committed_paths[1][1]
 
 
 def test_execute_pair_cycles_excludes_run_outputs_from_blocked_commit(tmp_path: Path, monkeypatch):
@@ -1411,18 +1435,18 @@ def test_execute_pair_cycles_excludes_run_outputs_from_blocked_commit(tmp_path: 
     criteria_file.write_text("- [x] done\n", encoding="utf-8")
     feedback_file.write_text("# feedback\n", encoding="utf-8")
 
-    selection = superloop.ResolvedPhaseSelection(
+    selection = autoloop.ResolvedPhaseSelection(
         phase_mode="single",
         phase_ids=("phase-1",),
         phases=(
-            superloop.PhasePlanPhase(
+            autoloop.PhasePlanPhase(
                 phase_id="phase-1",
                 title="Phase 1",
                 objective="Deliver phase 1",
                 in_scope=("code path A",),
                 out_of_scope=(),
                 dependencies=(),
-                acceptance_criteria=(superloop.PhasePlanCriterion(id="AC-1", text="done"),),
+                acceptance_criteria=(autoloop.PhasePlanCriterion(id="AC-1", text="done"),),
                 deliverables=("code",),
                 risks=(),
                 rollback=(),
@@ -1431,7 +1455,7 @@ def test_execute_pair_cycles_excludes_run_outputs_from_blocked_commit(tmp_path: 
         ),
         explicit=True,
     )
-    bundle = superloop.ArtifactBundle(
+    bundle = autoloop.ArtifactBundle(
         pair="implement",
         scope="phase-local",
         artifact_dir=phase_dir,
@@ -1444,41 +1468,41 @@ def test_execute_pair_cycles_excludes_run_outputs_from_blocked_commit(tmp_path: 
         phase_title="Phase 1",
     )
 
-    producer_control = superloop.LoopControl(question=None, promise=None, source="canonical", raw_payload=None)
-    verifier_control = superloop.LoopControl(
+    producer_control = autoloop.LoopControl(question=None, promise=None, source="canonical", raw_payload=None)
+    verifier_control = autoloop.LoopControl(
         question=None,
-        promise=superloop.PROMISE_BLOCKED,
+        promise=autoloop.PROMISE_BLOCKED,
         source="canonical",
         raw_payload=None,
     )
     parse_results = [producer_control, verifier_control]
     delta_by_snapshot = {
         "producer": {
-            ".superloop/tasks/task-1/runs/run-1/events.jsonl",
+            ".autoloop/tasks/task-1/runs/run-1/events.jsonl",
             "src/feature.py",
         },
         "verifier": {
-            ".superloop/tasks/task-1/implement/phases/phase-1/feedback.md",
+            ".autoloop/tasks/task-1/implement/phases/phase-1/feedback.md",
         },
     }
     committed_paths: list[tuple[str, set[str]]] = []
 
-    monkeypatch.setattr(superloop, "commit_tracked_changes", lambda *args, **kwargs: False)
-    monkeypatch.setattr(superloop, "phase_snapshot_ref", lambda *_args, **_kwargs: "producer" if not committed_paths else "verifier")
+    monkeypatch.setattr(autoloop, "commit_tracked_changes", lambda *args, **kwargs: False)
+    monkeypatch.setattr(autoloop, "phase_snapshot_ref", lambda *_args, **_kwargs: "producer" if not committed_paths else "verifier")
     monkeypatch.setattr(
-        superloop,
+        autoloop,
         "run_codex_phase",
         lambda *args, **kwargs: "<loop-control></loop-control>",
     )
-    monkeypatch.setattr(superloop, "parse_phase_control", lambda *args, **kwargs: parse_results.pop(0))
+    monkeypatch.setattr(autoloop, "parse_phase_control", lambda *args, **kwargs: parse_results.pop(0))
     monkeypatch.setattr(
-        superloop,
+        autoloop,
         "changed_paths_from_snapshot",
         lambda _root, snapshot, tracked_paths=None: set(delta_by_snapshot[snapshot]),
     )
-    monkeypatch.setattr(superloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(autoloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(
-        superloop,
+        autoloop,
         "commit_paths",
         lambda _root, message, paths: committed_paths.append((message, set(paths))) or True,
     )
@@ -1505,15 +1529,15 @@ def test_execute_pair_cycles_excludes_run_outputs_from_blocked_commit(tmp_path: 
 
     assert (status, code) == ("blocked", 2)
     assert [message for message, _paths in committed_paths] == [
-        "superloop: producer edits (implement #1)",
-        "superloop: blocked (implement #1)",
+        "autoloop: producer edits (implement #1)",
+        "autoloop: blocked (implement #1)",
     ]
     assert all(
-        not any(path.startswith(".superloop/tasks/task-1/runs/") for path in paths)
+        not any(path.startswith(".autoloop/tasks/task-1/runs/") for path in paths)
         for _message, paths in committed_paths
     )
     assert "src/feature.py" in committed_paths[0][1]
-    assert ".superloop/tasks/task-1/implement/phases/phase-1/feedback.md" in committed_paths[1][1]
+    assert ".autoloop/tasks/task-1/implement/phases/phase-1/feedback.md" in committed_paths[1][1]
 
 
 def test_ensure_workspace_preserve_mode_keeps_existing_request(tmp_path: Path):
@@ -1530,7 +1554,7 @@ def test_ensure_workspace_preserve_mode_keeps_existing_request(tmp_path: Path):
         intent_mode="preserve",
     )
 
-    task_meta = json.loads((tmp_path / ".superloop" / "tasks" / "same-task" / "task.json").read_text(encoding="utf-8"))
+    task_meta = json.loads((tmp_path / ".autoloop" / "tasks" / "same-task" / "task.json").read_text(encoding="utf-8"))
     assert task_meta["request_text"] == "Intent A"
 
 
@@ -1546,18 +1570,18 @@ def test_execute_pair_cycles_failure_commit_uses_tracked_pair_paths_only(tmp_pat
     criteria_file.write_text("- [x] done\n", encoding="utf-8")
     feedback_file.write_text("# feedback\n", encoding="utf-8")
 
-    selection = superloop.ResolvedPhaseSelection(
+    selection = autoloop.ResolvedPhaseSelection(
         phase_mode="single",
         phase_ids=("phase-1",),
         phases=(
-            superloop.PhasePlanPhase(
+            autoloop.PhasePlanPhase(
                 phase_id="phase-1",
                 title="Phase 1",
                 objective="Deliver phase 1",
                 in_scope=("code path A",),
                 out_of_scope=(),
                 dependencies=(),
-                acceptance_criteria=(superloop.PhasePlanCriterion(id="AC-1", text="done"),),
+                acceptance_criteria=(autoloop.PhasePlanCriterion(id="AC-1", text="done"),),
                 deliverables=("code",),
                 risks=(),
                 rollback=(),
@@ -1566,7 +1590,7 @@ def test_execute_pair_cycles_failure_commit_uses_tracked_pair_paths_only(tmp_pat
         ),
         explicit=True,
     )
-    bundle = superloop.ArtifactBundle(
+    bundle = autoloop.ArtifactBundle(
         pair="implement",
         scope="phase-local",
         artifact_dir=phase_dir,
@@ -1579,41 +1603,41 @@ def test_execute_pair_cycles_failure_commit_uses_tracked_pair_paths_only(tmp_pat
         phase_title="Phase 1",
     )
 
-    producer_control = superloop.LoopControl(question=None, promise=None, source="canonical", raw_payload=None)
-    verifier_control = superloop.LoopControl(
+    producer_control = autoloop.LoopControl(question=None, promise=None, source="canonical", raw_payload=None)
+    verifier_control = autoloop.LoopControl(
         question=None,
-        promise=superloop.PROMISE_INCOMPLETE,
+        promise=autoloop.PROMISE_INCOMPLETE,
         source="canonical",
         raw_payload=None,
     )
     parse_results = [producer_control, verifier_control]
     delta_by_snapshot = {
         "producer": {
-            ".superloop/tasks/task-1/runs/run-1/events.jsonl",
+            ".autoloop/tasks/task-1/runs/run-1/events.jsonl",
             "src/feature.py",
         },
         "verifier": {
-            ".superloop/tasks/task-1/implement/phases/phase-1/feedback.md",
+            ".autoloop/tasks/task-1/implement/phases/phase-1/feedback.md",
         },
     }
     committed_paths: list[tuple[str, set[str]]] = []
 
-    monkeypatch.setattr(superloop, "commit_tracked_changes", lambda *args, **kwargs: False)
-    monkeypatch.setattr(superloop, "phase_snapshot_ref", lambda *_args, **_kwargs: "producer" if not committed_paths else "verifier")
-    monkeypatch.setattr(superloop, "run_codex_phase", lambda *args, **kwargs: "<loop-control></loop-control>")
-    monkeypatch.setattr(superloop, "parse_phase_control", lambda *args, **kwargs: parse_results.pop(0))
+    monkeypatch.setattr(autoloop, "commit_tracked_changes", lambda *args, **kwargs: False)
+    monkeypatch.setattr(autoloop, "phase_snapshot_ref", lambda *_args, **_kwargs: "producer" if not committed_paths else "verifier")
+    monkeypatch.setattr(autoloop, "run_codex_phase", lambda *args, **kwargs: "<loop-control></loop-control>")
+    monkeypatch.setattr(autoloop, "parse_phase_control", lambda *args, **kwargs: parse_results.pop(0))
     monkeypatch.setattr(
-        superloop,
+        autoloop,
         "changed_paths_from_snapshot",
         lambda _root, snapshot, tracked_paths=None: set(delta_by_snapshot[snapshot]),
     )
-    monkeypatch.setattr(superloop, "criteria_all_checked", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(autoloop, "criteria_all_checked", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(
-        superloop,
+        autoloop,
         "commit_paths",
         lambda _root, message, paths: committed_paths.append((message, set(paths))) or True,
     )
-    monkeypatch.setattr(superloop.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(autoloop.time, "sleep", lambda _seconds: None)
 
     status, code = execute_pair_cycles(
         pair_cfg=PairConfig(name="implement", enabled=True, max_iterations=1),
@@ -1637,14 +1661,14 @@ def test_execute_pair_cycles_failure_commit_uses_tracked_pair_paths_only(tmp_pat
 
     assert (status, code) == ("failed", 1)
     assert [message for message, _paths in committed_paths] == [
-        "superloop: producer edits (implement #1)",
-        "superloop: verifier feedback (implement #1)",
-        "superloop: failed (implement max iterations)",
+        "autoloop: producer edits (implement #1)",
+        "autoloop: verifier feedback (implement #1)",
+        "autoloop: failed (implement max iterations)",
     ]
-    assert committed_paths[-1][1] == set(superloop.tracked_superloop_paths(".superloop/tasks/task-1", "implement"))
+    assert committed_paths[-1][1] == set(autoloop.tracked_autoloop_paths(".autoloop/tasks/task-1", "implement"))
     assert all(
         not any(
-            path.endswith("run_log.md") or path.endswith("summary.md") or path.startswith(".superloop/tasks/task-1/runs/")
+            path.endswith("run_log.md") or path.endswith("summary.md") or path.startswith(".autoloop/tasks/task-1/runs/")
             for path in paths
         )
         for _message, paths in committed_paths
@@ -1705,7 +1729,7 @@ def test_append_clarification_logs_to_raw_phase_log_and_updates_session(tmp_path
 
 
 def test_format_question_preserves_inline_best_supposition_text():
-    control = superloop.LoopControl(
+    control = autoloop.LoopControl(
         question=LoopQuestion(
             text="Need confirmation?\nBest supposition: proceed safely",
             best_supposition="proceed safely",
@@ -1715,11 +1739,11 @@ def test_format_question_preserves_inline_best_supposition_text():
         raw_payload=None,
     )
 
-    assert superloop.format_question(control) == "Need confirmation?\nBest supposition: proceed safely"
+    assert autoloop.format_question(control) == "Need confirmation?\nBest supposition: proceed safely"
 
 
 def test_format_question_renders_best_supposition_fallback_when_missing_from_text():
-    control = superloop.LoopControl(
+    control = autoloop.LoopControl(
         question=LoopQuestion(
             text="Need confirmation?",
             best_supposition="proceed safely",
@@ -1729,7 +1753,7 @@ def test_format_question_renders_best_supposition_fallback_when_missing_from_tex
         raw_payload=None,
     )
 
-    assert superloop.format_question(control) == "Need confirmation?\nBest supposition: proceed safely"
+    assert autoloop.format_question(control) == "Need confirmation?\nBest supposition: proceed safely"
 
 
 def test_execute_pair_cycles_removes_empty_producer_block_before_runtime_question_blocks(tmp_path: Path, monkeypatch):
@@ -1744,18 +1768,18 @@ def test_execute_pair_cycles_removes_empty_producer_block_before_runtime_questio
     criteria_file.write_text("- [x] done\n", encoding="utf-8")
     feedback_file.write_text("# feedback\n", encoding="utf-8")
 
-    selection = superloop.ResolvedPhaseSelection(
+    selection = autoloop.ResolvedPhaseSelection(
         phase_mode="single",
         phase_ids=("phase-1",),
         phases=(
-            superloop.PhasePlanPhase(
+            autoloop.PhasePlanPhase(
                 phase_id="phase-1",
                 title="Phase 1",
                 objective="Deliver phase 1",
                 in_scope=("code path A",),
                 out_of_scope=(),
                 dependencies=(),
-                acceptance_criteria=(superloop.PhasePlanCriterion(id="AC-1", text="done"),),
+                acceptance_criteria=(autoloop.PhasePlanCriterion(id="AC-1", text="done"),),
                 deliverables=("code",),
                 risks=(),
                 rollback=(),
@@ -1764,7 +1788,7 @@ def test_execute_pair_cycles_removes_empty_producer_block_before_runtime_questio
         ),
         explicit=True,
     )
-    bundle = superloop.ArtifactBundle(
+    bundle = autoloop.ArtifactBundle(
         pair="implement",
         scope="phase-local",
         artifact_dir=phase_dir,
@@ -1796,16 +1820,16 @@ def test_execute_pair_cycles_removes_empty_producer_block_before_runtime_questio
     class StopAfterClarification(RuntimeError):
         pass
 
-    original_append_clarification = superloop.append_clarification
+    original_append_clarification = autoloop.append_clarification
 
     def stop_after_clarification(*args, **kwargs):
         original_append_clarification(*args, **kwargs)
         raise StopAfterClarification
 
-    monkeypatch.setattr(superloop, "commit_tracked_changes", lambda *args, **kwargs: False)
-    monkeypatch.setattr(superloop, "run_codex_phase", fake_run_codex_phase)
-    monkeypatch.setattr(superloop, "ask_human", lambda question_text: "Approved answer")
-    monkeypatch.setattr(superloop, "append_clarification", stop_after_clarification)
+    monkeypatch.setattr(autoloop, "commit_tracked_changes", lambda *args, **kwargs: False)
+    monkeypatch.setattr(autoloop, "run_codex_phase", fake_run_codex_phase)
+    monkeypatch.setattr(autoloop, "ask_human", lambda question_text: "Approved answer")
+    monkeypatch.setattr(autoloop, "append_clarification", stop_after_clarification)
 
     with pytest.raises(StopAfterClarification):
         execute_pair_cycles(
@@ -1850,18 +1874,18 @@ def test_execute_pair_cycles_preserves_non_empty_producer_block_on_question_turn
     criteria_file.write_text("- [x] done\n", encoding="utf-8")
     feedback_file.write_text("# feedback\n", encoding="utf-8")
 
-    selection = superloop.ResolvedPhaseSelection(
+    selection = autoloop.ResolvedPhaseSelection(
         phase_mode="single",
         phase_ids=("phase-1",),
         phases=(
-            superloop.PhasePlanPhase(
+            autoloop.PhasePlanPhase(
                 phase_id="phase-1",
                 title="Phase 1",
                 objective="Deliver phase 1",
                 in_scope=("code path A",),
                 out_of_scope=(),
                 dependencies=(),
-                acceptance_criteria=(superloop.PhasePlanCriterion(id="AC-1", text="done"),),
+                acceptance_criteria=(autoloop.PhasePlanCriterion(id="AC-1", text="done"),),
                 deliverables=("code",),
                 risks=(),
                 rollback=(),
@@ -1870,7 +1894,7 @@ def test_execute_pair_cycles_preserves_non_empty_producer_block_on_question_turn
         ),
         explicit=True,
     )
-    bundle = superloop.ArtifactBundle(
+    bundle = autoloop.ArtifactBundle(
         pair="implement",
         scope="phase-local",
         artifact_dir=phase_dir,
@@ -1900,16 +1924,16 @@ def test_execute_pair_cycles_preserves_non_empty_producer_block_on_question_turn
     class StopAfterClarification(RuntimeError):
         pass
 
-    original_append_clarification = superloop.append_clarification
+    original_append_clarification = autoloop.append_clarification
 
     def stop_after_clarification(*args, **kwargs):
         original_append_clarification(*args, **kwargs)
         raise StopAfterClarification
 
-    monkeypatch.setattr(superloop, "commit_tracked_changes", lambda *args, **kwargs: False)
-    monkeypatch.setattr(superloop, "run_codex_phase", fake_run_codex_phase)
-    monkeypatch.setattr(superloop, "ask_human", lambda question_text: "Approved answer")
-    monkeypatch.setattr(superloop, "append_clarification", stop_after_clarification)
+    monkeypatch.setattr(autoloop, "commit_tracked_changes", lambda *args, **kwargs: False)
+    monkeypatch.setattr(autoloop, "run_codex_phase", fake_run_codex_phase)
+    monkeypatch.setattr(autoloop, "ask_human", lambda question_text: "Approved answer")
+    monkeypatch.setattr(autoloop, "append_clarification", stop_after_clarification)
 
     with pytest.raises(StopAfterClarification):
         execute_pair_cycles(
@@ -1932,7 +1956,7 @@ def test_execute_pair_cycles_preserves_non_empty_producer_block_on_question_turn
             use_resume_state=False,
         )
 
-    blocks = superloop.parse_decisions_headers(paths["decisions_file"].read_text(encoding="utf-8"))
+    blocks = autoloop.parse_decisions_headers(paths["decisions_file"].read_text(encoding="utf-8"))
     assert [block.attrs.get("owner") for block in blocks] == ["implementer", "runtime", "runtime"]
     assert [block.attrs.get("entry") for block in blocks] == [None, "questions", "answers"]
     assert blocks[0].body == "Keep runtime-created producer header when body is non-empty\n"
@@ -1952,18 +1976,18 @@ def test_execute_pair_cycles_retries_malformed_producer_loop_control_once(tmp_pa
     criteria_file.write_text("- [x] done\n", encoding="utf-8")
     feedback_file.write_text("# feedback\n", encoding="utf-8")
 
-    selection = superloop.ResolvedPhaseSelection(
+    selection = autoloop.ResolvedPhaseSelection(
         phase_mode="single",
         phase_ids=("phase-1",),
         phases=(
-            superloop.PhasePlanPhase(
+            autoloop.PhasePlanPhase(
                 phase_id="phase-1",
                 title="Phase 1",
                 objective="Deliver phase 1",
                 in_scope=("code path A",),
                 out_of_scope=(),
                 dependencies=(),
-                acceptance_criteria=(superloop.PhasePlanCriterion(id="AC-1", text="done"),),
+                acceptance_criteria=(autoloop.PhasePlanCriterion(id="AC-1", text="done"),),
                 deliverables=("code",),
                 risks=(),
                 rollback=(),
@@ -1972,7 +1996,7 @@ def test_execute_pair_cycles_retries_malformed_producer_loop_control_once(tmp_pa
         ),
         explicit=True,
     )
-    bundle = superloop.ArtifactBundle(
+    bundle = autoloop.ArtifactBundle(
         pair="implement",
         scope="phase-local",
         artifact_dir=phase_dir,
@@ -2011,7 +2035,7 @@ def test_execute_pair_cycles_retries_malformed_producer_loop_control_once(tmp_pa
     class StopAfterClarification(RuntimeError):
         pass
 
-    original_append_clarification = superloop.append_clarification
+    original_append_clarification = autoloop.append_clarification
 
     def stop_after_clarification(*args, **kwargs):
         original_append_clarification(*args, **kwargs)
@@ -2021,10 +2045,10 @@ def test_execute_pair_cycles_retries_malformed_producer_loop_control_once(tmp_pa
         asked_questions.append(question_text)
         return "Approved answer"
 
-    monkeypatch.setattr(superloop, "commit_tracked_changes", lambda *args, **kwargs: False)
-    monkeypatch.setattr(superloop, "run_codex_phase", fake_run_codex_phase)
-    monkeypatch.setattr(superloop, "ask_human", fake_ask_human)
-    monkeypatch.setattr(superloop, "append_clarification", stop_after_clarification)
+    monkeypatch.setattr(autoloop, "commit_tracked_changes", lambda *args, **kwargs: False)
+    monkeypatch.setattr(autoloop, "run_codex_phase", fake_run_codex_phase)
+    monkeypatch.setattr(autoloop, "ask_human", fake_ask_human)
+    monkeypatch.setattr(autoloop, "append_clarification", stop_after_clarification)
 
     with pytest.raises(StopAfterClarification):
         execute_pair_cycles(
@@ -2066,18 +2090,18 @@ def test_execute_pair_cycles_retries_malformed_verifier_loop_control_once(tmp_pa
     criteria_file.write_text("- [x] done\n", encoding="utf-8")
     feedback_file.write_text("# feedback\n", encoding="utf-8")
 
-    selection = superloop.ResolvedPhaseSelection(
+    selection = autoloop.ResolvedPhaseSelection(
         phase_mode="single",
         phase_ids=("phase-1",),
         phases=(
-            superloop.PhasePlanPhase(
+            autoloop.PhasePlanPhase(
                 phase_id="phase-1",
                 title="Phase 1",
                 objective="Deliver phase 1",
                 in_scope=("code path A",),
                 out_of_scope=(),
                 dependencies=(),
-                acceptance_criteria=(superloop.PhasePlanCriterion(id="AC-1", text="done"),),
+                acceptance_criteria=(autoloop.PhasePlanCriterion(id="AC-1", text="done"),),
                 deliverables=("code",),
                 risks=(),
                 rollback=(),
@@ -2086,7 +2110,7 @@ def test_execute_pair_cycles_retries_malformed_verifier_loop_control_once(tmp_pa
         ),
         explicit=True,
     )
-    bundle = superloop.ArtifactBundle(
+    bundle = autoloop.ArtifactBundle(
         pair="implement",
         scope="phase-local",
         artifact_dir=phase_dir,
@@ -2118,9 +2142,9 @@ def test_execute_pair_cycles_retries_malformed_verifier_loop_control_once(tmp_pa
         Path(args[10]).write_text(json.dumps(session_payload, indent=2) + "\n", encoding="utf-8")
         return '<loop-control>{"schema":"docloop.loop_control/v1","kind":"promise","promise":"COMPLETE"}</loop-control>'
 
-    monkeypatch.setattr(superloop, "commit_tracked_changes", lambda *args, **kwargs: False)
-    monkeypatch.setattr(superloop, "run_codex_phase", fake_run_codex_phase)
-    monkeypatch.setattr(superloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(autoloop, "commit_tracked_changes", lambda *args, **kwargs: False)
+    monkeypatch.setattr(autoloop, "run_codex_phase", fake_run_codex_phase)
+    monkeypatch.setattr(autoloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
 
     status, code = execute_pair_cycles(
         pair_cfg=PairConfig(name="implement", enabled=True, max_iterations=1),
@@ -2153,7 +2177,7 @@ def test_parse_phase_control_retries_once_before_failing():
     feedback_notes: list[str] = []
 
     with pytest.raises(SystemExit, match="1"):
-        superloop.parse_phase_control(
+        autoloop.parse_phase_control(
             "<loop-control>{not-json}</loop-control>",
             "producer",
             "implement",
@@ -2178,18 +2202,18 @@ def test_execute_pair_cycles_does_not_precreate_verifier_decision_header(tmp_pat
     criteria_file.write_text("- [x] done\n", encoding="utf-8")
     feedback_file.write_text("# feedback\n", encoding="utf-8")
 
-    selection = superloop.ResolvedPhaseSelection(
+    selection = autoloop.ResolvedPhaseSelection(
         phase_mode="single",
         phase_ids=("phase-1",),
         phases=(
-            superloop.PhasePlanPhase(
+            autoloop.PhasePlanPhase(
                 phase_id="phase-1",
                 title="Phase 1",
                 objective="Deliver phase 1",
                 in_scope=("code path A",),
                 out_of_scope=(),
                 dependencies=(),
-                acceptance_criteria=(superloop.PhasePlanCriterion(id="AC-1", text="done"),),
+                acceptance_criteria=(autoloop.PhasePlanCriterion(id="AC-1", text="done"),),
                 deliverables=("code",),
                 risks=(),
                 rollback=(),
@@ -2198,7 +2222,7 @@ def test_execute_pair_cycles_does_not_precreate_verifier_decision_header(tmp_pat
         ),
         explicit=True,
     )
-    bundle = superloop.ArtifactBundle(
+    bundle = autoloop.ArtifactBundle(
         pair="implement",
         scope="phase-local",
         artifact_dir=phase_dir,
@@ -2212,10 +2236,10 @@ def test_execute_pair_cycles_does_not_precreate_verifier_decision_header(tmp_pat
     )
 
     parse_results = [
-        superloop.LoopControl(question=None, promise=None, source="canonical", raw_payload=None),
-        superloop.LoopControl(
+        autoloop.LoopControl(question=None, promise=None, source="canonical", raw_payload=None),
+        autoloop.LoopControl(
             question=None,
-            promise=superloop.PROMISE_COMPLETE,
+            promise=autoloop.PROMISE_COMPLETE,
             source="canonical",
             raw_payload=None,
         ),
@@ -2232,10 +2256,10 @@ def test_execute_pair_cycles_does_not_precreate_verifier_decision_header(tmp_pat
             return "<loop-control></loop-control>"
         raise AssertionError(f"Unexpected phase {phase_name}")
 
-    monkeypatch.setattr(superloop, "commit_tracked_changes", lambda *args, **kwargs: False)
-    monkeypatch.setattr(superloop, "run_codex_phase", fake_run_codex_phase)
-    monkeypatch.setattr(superloop, "parse_phase_control", lambda *args, **kwargs: parse_results.pop(0))
-    monkeypatch.setattr(superloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(autoloop, "commit_tracked_changes", lambda *args, **kwargs: False)
+    monkeypatch.setattr(autoloop, "run_codex_phase", fake_run_codex_phase)
+    monkeypatch.setattr(autoloop, "parse_phase_control", lambda *args, **kwargs: parse_results.pop(0))
+    monkeypatch.setattr(autoloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
 
     status, code = execute_pair_cycles(
         pair_cfg=PairConfig(name="implement", enabled=True, max_iterations=1),
@@ -2271,23 +2295,23 @@ def test_main_resume_without_session_file_starts_new_conversation_and_logs_notic
     )
     run_paths = create_run_paths(paths["runs_dir"], "run-20260316T120000Z-abcdef12", "Legacy request")
     run_paths["plan_session_file"].unlink()
-    control = superloop.LoopControl(
+    control = autoloop.LoopControl(
         question=None,
-        promise=superloop.PROMISE_COMPLETE,
+        promise=autoloop.PROMISE_COMPLETE,
         source="canonical",
         raw_payload=None,
     )
 
-    monkeypatch.setattr(superloop, "check_dependencies", lambda require_git=True: None)
-    monkeypatch.setattr(superloop, "resolve_codex_exec_command", lambda model: fake_codex_command())
-    monkeypatch.setattr(superloop, "run_codex_phase", lambda *args, **kwargs: "<loop-control></loop-control>")
-    monkeypatch.setattr(superloop, "parse_phase_control", lambda *args, **kwargs: control)
-    monkeypatch.setattr(superloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(autoloop, "check_dependencies", lambda require_git=True: None)
+    monkeypatch.setattr(autoloop, "resolve_codex_exec_command", lambda model: fake_codex_command())
+    monkeypatch.setattr(autoloop, "run_codex_phase", lambda *args, **kwargs: "<loop-control></loop-control>")
+    monkeypatch.setattr(autoloop, "parse_phase_control", lambda *args, **kwargs: control)
+    monkeypatch.setattr(autoloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(
-        superloop.sys,
+        autoloop.sys,
         "argv",
         [
-            "superloop.py",
+            "autoloop.py",
             "--workspace",
             str(tmp_path),
             "--pairs",
@@ -2303,7 +2327,7 @@ def test_main_resume_without_session_file_starts_new_conversation_and_logs_notic
         ],
     )
 
-    exit_code = superloop.main()
+    exit_code = autoloop.main()
     assert exit_code == 0
     session_payload = json.loads(run_paths["plan_session_file"].read_text(encoding="utf-8"))
     assert session_payload["mode"] == "persistent"
@@ -2335,23 +2359,23 @@ def test_main_resume_with_missing_thread_id_starts_new_conversation_and_logs_not
         + "\n",
         encoding="utf-8",
     )
-    control = superloop.LoopControl(
+    control = autoloop.LoopControl(
         question=None,
-        promise=superloop.PROMISE_COMPLETE,
+        promise=autoloop.PROMISE_COMPLETE,
         source="canonical",
         raw_payload=None,
     )
 
-    monkeypatch.setattr(superloop, "check_dependencies", lambda require_git=True: None)
-    monkeypatch.setattr(superloop, "resolve_codex_exec_command", lambda model: fake_codex_command())
-    monkeypatch.setattr(superloop, "run_codex_phase", lambda *args, **kwargs: "<loop-control></loop-control>")
-    monkeypatch.setattr(superloop, "parse_phase_control", lambda *args, **kwargs: control)
-    monkeypatch.setattr(superloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(autoloop, "check_dependencies", lambda require_git=True: None)
+    monkeypatch.setattr(autoloop, "resolve_codex_exec_command", lambda model: fake_codex_command())
+    monkeypatch.setattr(autoloop, "run_codex_phase", lambda *args, **kwargs: "<loop-control></loop-control>")
+    monkeypatch.setattr(autoloop, "parse_phase_control", lambda *args, **kwargs: control)
+    monkeypatch.setattr(autoloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(
-        superloop.sys,
+        autoloop.sys,
         "argv",
         [
-            "superloop.py",
+            "autoloop.py",
             "--workspace",
             str(tmp_path),
             "--pairs",
@@ -2367,7 +2391,7 @@ def test_main_resume_with_missing_thread_id_starts_new_conversation_and_logs_not
         ],
     )
 
-    exit_code = superloop.main()
+    exit_code = autoloop.main()
     assert exit_code == 0
     raw_log_text = run_paths["raw_phase_log"].read_text(encoding="utf-8")
     assert "new conversation for the next phase" in raw_log_text
@@ -2392,23 +2416,23 @@ def test_main_resume_reconstructs_missing_request_from_legacy_context_not_curren
 
     run_paths = create_run_paths(paths["runs_dir"], "run-20260316T120000Z-abcdef12", "Original request")
     run_paths["request_file"].unlink()
-    control = superloop.LoopControl(
+    control = autoloop.LoopControl(
         question=None,
-        promise=superloop.PROMISE_COMPLETE,
+        promise=autoloop.PROMISE_COMPLETE,
         source="canonical",
         raw_payload=None,
     )
 
-    monkeypatch.setattr(superloop, "check_dependencies", lambda require_git=True: None)
-    monkeypatch.setattr(superloop, "resolve_codex_exec_command", lambda model: fake_codex_command())
-    monkeypatch.setattr(superloop, "run_codex_phase", lambda *args, **kwargs: "<loop-control></loop-control>")
-    monkeypatch.setattr(superloop, "parse_phase_control", lambda *args, **kwargs: control)
-    monkeypatch.setattr(superloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(autoloop, "check_dependencies", lambda require_git=True: None)
+    monkeypatch.setattr(autoloop, "resolve_codex_exec_command", lambda model: fake_codex_command())
+    monkeypatch.setattr(autoloop, "run_codex_phase", lambda *args, **kwargs: "<loop-control></loop-control>")
+    monkeypatch.setattr(autoloop, "parse_phase_control", lambda *args, **kwargs: control)
+    monkeypatch.setattr(autoloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(
-        superloop.sys,
+        autoloop.sys,
         "argv",
         [
-            "superloop.py",
+            "autoloop.py",
             "--workspace",
             str(tmp_path),
             "--pairs",
@@ -2424,7 +2448,7 @@ def test_main_resume_reconstructs_missing_request_from_legacy_context_not_curren
         ],
     )
 
-    exit_code = superloop.main()
+    exit_code = autoloop.main()
     assert exit_code == 0
     request_text = run_paths["request_file"].read_text(encoding="utf-8")
     raw_log_text = run_paths["raw_phase_log"].read_text(encoding="utf-8")
@@ -2474,29 +2498,29 @@ def test_main_without_phase_id_with_explicit_phase_plan_executes_all_phases_in_o
             },
         ],
     )
-    control = superloop.LoopControl(
+    control = autoloop.LoopControl(
         question=None,
-        promise=superloop.PROMISE_COMPLETE,
+        promise=autoloop.PROMISE_COMPLETE,
         source="canonical",
         raw_payload=None,
     )
     calls: list[tuple[str, str]] = []
 
-    monkeypatch.setattr(superloop, "check_dependencies", lambda require_git=True: None)
-    monkeypatch.setattr(superloop, "resolve_codex_exec_command", lambda model: fake_codex_command())
+    monkeypatch.setattr(autoloop, "check_dependencies", lambda require_git=True: None)
+    monkeypatch.setattr(autoloop, "resolve_codex_exec_command", lambda model: fake_codex_command())
     monkeypatch.setattr(
-        superloop,
+        autoloop,
         "run_codex_phase",
         lambda *args, **kwargs: calls.append((args[5], kwargs["active_phase_selection"].phase_ids[0])) or "<loop-control></loop-control>",
     )
-    monkeypatch.setattr(superloop, "parse_phase_control", lambda *args, **kwargs: control)
-    monkeypatch.setattr(superloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(autoloop, "parse_phase_control", lambda *args, **kwargs: control)
+    monkeypatch.setattr(autoloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
 
     monkeypatch.setattr(
-        superloop.sys,
+        autoloop.sys,
         "argv",
         [
-            "superloop.py",
+            "autoloop.py",
             "--workspace",
             str(tmp_path),
             "--pairs",
@@ -2509,7 +2533,7 @@ def test_main_without_phase_id_with_explicit_phase_plan_executes_all_phases_in_o
         ],
     )
 
-    exit_code = superloop.main()
+    exit_code = autoloop.main()
     assert exit_code == 0
     assert calls == [
         ("implement", "phase-1"),
@@ -2533,15 +2557,15 @@ def test_main_fails_fast_when_yaml_missing_for_plan_plus_phased_pairs(tmp_path: 
         intent_mode="replace",
     )
 
-    monkeypatch.setattr(superloop, "yaml", None)
-    monkeypatch.setattr(superloop, "check_dependencies", lambda require_git=True: None)
-    monkeypatch.setattr(superloop, "resolve_codex_exec_command", lambda model: fake_codex_command())
+    monkeypatch.setattr(autoloop, "yaml", None)
+    monkeypatch.setattr(autoloop, "check_dependencies", lambda require_git=True: None)
+    monkeypatch.setattr(autoloop, "resolve_codex_exec_command", lambda model: fake_codex_command())
 
     monkeypatch.setattr(
-        superloop.sys,
+        autoloop.sys,
         "argv",
         [
-            "superloop.py",
+            "autoloop.py",
             "--workspace",
             str(tmp_path),
             "--pairs",
@@ -2556,7 +2580,7 @@ def test_main_fails_fast_when_yaml_missing_for_plan_plus_phased_pairs(tmp_path: 
 
     import pytest
     with pytest.raises(SystemExit):
-        superloop.main()
+        autoloop.main()
 
     assert phase_plan_file(paths["task_dir"]).exists() is False
 
@@ -2573,15 +2597,15 @@ def test_main_plan_run_seeds_phase_plan_scaffold_after_request_snapshot_exists(t
         seen["request_file"] = str(run_paths["request_file"])
         return ("complete", 0)
 
-    monkeypatch.setattr(superloop, "check_dependencies", lambda require_git=True: None)
-    monkeypatch.setattr(superloop, "resolve_codex_exec_command", lambda model: fake_codex_command())
-    monkeypatch.setattr(superloop, "execute_pair_cycles", fake_execute_pair_cycles)
-    monkeypatch.setattr(superloop, "commit_tracked_changes", lambda *args, **kwargs: False)
+    monkeypatch.setattr(autoloop, "check_dependencies", lambda require_git=True: None)
+    monkeypatch.setattr(autoloop, "resolve_codex_exec_command", lambda model: fake_codex_command())
+    monkeypatch.setattr(autoloop, "execute_pair_cycles", fake_execute_pair_cycles)
+    monkeypatch.setattr(autoloop, "commit_tracked_changes", lambda *args, **kwargs: False)
     monkeypatch.setattr(
-        superloop.sys,
+        autoloop.sys,
         "argv",
         [
-            "superloop.py",
+            "autoloop.py",
             "--workspace",
             str(tmp_path),
             "--pairs",
@@ -2594,12 +2618,12 @@ def test_main_plan_run_seeds_phase_plan_scaffold_after_request_snapshot_exists(t
         ],
     )
 
-    exit_code = superloop.main()
+    exit_code = autoloop.main()
     assert exit_code == 0
     assert seen["phase_plan_exists"] is True
     assert seen["request_exists"] is True
     assert seen["payload"] == {
-        "version": superloop.PHASE_PLAN_VERSION,
+        "version": autoloop.PHASE_PLAN_VERSION,
         "task_id": "plan-scaffold-task",
         "request_snapshot_ref": seen["request_file"],
         "phases": [],
@@ -2613,24 +2637,24 @@ def test_main_allows_implicit_legacy_phase_when_yaml_missing_and_no_explicit_pla
         product_intent="Legacy implicit flow",
         intent_mode="replace",
     )
-    control = superloop.LoopControl(
+    control = autoloop.LoopControl(
         question=None,
-        promise=superloop.PROMISE_COMPLETE,
+        promise=autoloop.PROMISE_COMPLETE,
         source="canonical",
         raw_payload=None,
     )
 
-    monkeypatch.setattr(superloop, "yaml", None)
-    monkeypatch.setattr(superloop, "check_dependencies", lambda require_git=True: None)
-    monkeypatch.setattr(superloop, "resolve_codex_exec_command", lambda model: fake_codex_command())
-    monkeypatch.setattr(superloop, "run_codex_phase", lambda *args, **kwargs: "<loop-control></loop-control>")
-    monkeypatch.setattr(superloop, "parse_phase_control", lambda *args, **kwargs: control)
-    monkeypatch.setattr(superloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(autoloop, "yaml", None)
+    monkeypatch.setattr(autoloop, "check_dependencies", lambda require_git=True: None)
+    monkeypatch.setattr(autoloop, "resolve_codex_exec_command", lambda model: fake_codex_command())
+    monkeypatch.setattr(autoloop, "run_codex_phase", lambda *args, **kwargs: "<loop-control></loop-control>")
+    monkeypatch.setattr(autoloop, "parse_phase_control", lambda *args, **kwargs: control)
+    monkeypatch.setattr(autoloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(
-        superloop.sys,
+        autoloop.sys,
         "argv",
         [
-            "superloop.py",
+            "autoloop.py",
             "--workspace",
             str(tmp_path),
             "--pairs",
@@ -2643,7 +2667,7 @@ def test_main_allows_implicit_legacy_phase_when_yaml_missing_and_no_explicit_pla
         ],
     )
 
-    exit_code = superloop.main()
+    exit_code = autoloop.main()
     assert exit_code == 0
     assert phase_plan_file(paths["task_dir"]).exists() is False
 
@@ -2657,23 +2681,23 @@ def test_main_implement_with_explicit_phase_id_emits_phase_events_and_updates_me
         intent_mode="replace",
     )
     write_phase_plan(phase_plan_file(paths["task_dir"]), "phase-task")
-    control = superloop.LoopControl(
+    control = autoloop.LoopControl(
         question=None,
-        promise=superloop.PROMISE_COMPLETE,
+        promise=autoloop.PROMISE_COMPLETE,
         source="canonical",
         raw_payload=None,
     )
 
-    monkeypatch.setattr(superloop, "check_dependencies", lambda require_git=True: None)
-    monkeypatch.setattr(superloop, "resolve_codex_exec_command", lambda model: fake_codex_command())
-    monkeypatch.setattr(superloop, "run_codex_phase", lambda *args, **kwargs: "<loop-control></loop-control>")
-    monkeypatch.setattr(superloop, "parse_phase_control", lambda *args, **kwargs: control)
-    monkeypatch.setattr(superloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(autoloop, "check_dependencies", lambda require_git=True: None)
+    monkeypatch.setattr(autoloop, "resolve_codex_exec_command", lambda model: fake_codex_command())
+    monkeypatch.setattr(autoloop, "run_codex_phase", lambda *args, **kwargs: "<loop-control></loop-control>")
+    monkeypatch.setattr(autoloop, "parse_phase_control", lambda *args, **kwargs: control)
+    monkeypatch.setattr(autoloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(
-        superloop.sys,
+        autoloop.sys,
         "argv",
         [
-            "superloop.py",
+            "autoloop.py",
             "--workspace",
             str(tmp_path),
             "--pairs",
@@ -2688,7 +2712,7 @@ def test_main_implement_with_explicit_phase_id_emits_phase_events_and_updates_me
         ],
     )
 
-    exit_code = superloop.main()
+    exit_code = autoloop.main()
     assert exit_code == 0
 
     events_file = next((paths["runs_dir"]).iterdir()) / "events.jsonl"
@@ -2743,23 +2767,23 @@ def test_main_up_to_executes_phases_sequentially_and_completes_each_phase(tmp_pa
             },
         ],
     )
-    control = superloop.LoopControl(
+    control = autoloop.LoopControl(
         question=None,
-        promise=superloop.PROMISE_COMPLETE,
+        promise=autoloop.PROMISE_COMPLETE,
         source="canonical",
         raw_payload=None,
     )
 
-    monkeypatch.setattr(superloop, "check_dependencies", lambda require_git=True: None)
-    monkeypatch.setattr(superloop, "resolve_codex_exec_command", lambda model: fake_codex_command())
-    monkeypatch.setattr(superloop, "run_codex_phase", lambda *args, **kwargs: "<loop-control></loop-control>")
-    monkeypatch.setattr(superloop, "parse_phase_control", lambda *args, **kwargs: control)
-    monkeypatch.setattr(superloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(autoloop, "check_dependencies", lambda require_git=True: None)
+    monkeypatch.setattr(autoloop, "resolve_codex_exec_command", lambda model: fake_codex_command())
+    monkeypatch.setattr(autoloop, "run_codex_phase", lambda *args, **kwargs: "<loop-control></loop-control>")
+    monkeypatch.setattr(autoloop, "parse_phase_control", lambda *args, **kwargs: control)
+    monkeypatch.setattr(autoloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(
-        superloop.sys,
+        autoloop.sys,
         "argv",
         [
-            "superloop.py",
+            "autoloop.py",
             "--workspace",
             str(tmp_path),
             "--pairs",
@@ -2776,7 +2800,7 @@ def test_main_up_to_executes_phases_sequentially_and_completes_each_phase(tmp_pa
         ],
     )
 
-    exit_code = superloop.main()
+    exit_code = autoloop.main()
     assert exit_code == 0
 
     events_file = next((paths["runs_dir"]).iterdir()) / "events.jsonl"
@@ -2898,28 +2922,28 @@ def test_main_resume_without_phase_id_resumes_first_incomplete_phase_and_dedupes
     }
     paths["task_meta_file"].write_text(json.dumps(task_meta, indent=2) + "\n", encoding="utf-8")
 
-    control = superloop.LoopControl(
+    control = autoloop.LoopControl(
         question=None,
-        promise=superloop.PROMISE_COMPLETE,
+        promise=autoloop.PROMISE_COMPLETE,
         source="canonical",
         raw_payload=None,
     )
     calls: list[tuple[str, str, str]] = []
 
-    monkeypatch.setattr(superloop, "check_dependencies", lambda require_git=True: None)
-    monkeypatch.setattr(superloop, "resolve_codex_exec_command", lambda model: fake_codex_command())
+    monkeypatch.setattr(autoloop, "check_dependencies", lambda require_git=True: None)
+    monkeypatch.setattr(autoloop, "resolve_codex_exec_command", lambda model: fake_codex_command())
     monkeypatch.setattr(
-        superloop,
+        autoloop,
         "run_codex_phase",
         lambda *args, **kwargs: calls.append((args[5], args[4], kwargs["active_phase_selection"].phase_ids[0])) or "<loop-control></loop-control>",
     )
-    monkeypatch.setattr(superloop, "parse_phase_control", lambda *args, **kwargs: control)
-    monkeypatch.setattr(superloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(autoloop, "parse_phase_control", lambda *args, **kwargs: control)
+    monkeypatch.setattr(autoloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(
-        superloop.sys,
+        autoloop.sys,
         "argv",
         [
-            "superloop.py",
+            "autoloop.py",
             "--workspace",
             str(tmp_path),
             "--pairs",
@@ -2935,7 +2959,7 @@ def test_main_resume_without_phase_id_resumes_first_incomplete_phase_and_dedupes
         ],
     )
 
-    exit_code = superloop.main()
+    exit_code = autoloop.main()
     assert exit_code == 0
     assert [(pair, phase_id) for pair, _phase_name, phase_id in calls] == [
         ("test", "phase-2"),
@@ -2993,28 +3017,28 @@ def test_main_resume_skips_plan_pair_when_plan_already_completed(tmp_path: Path,
     recorder.emit("phase_scope_resolved", phase_mode="single", phase_ids=["phase-1"], current_phase_index=0)
     recorder.emit("phase_started", pair="implement", phase_id="phase-1")
 
-    control = superloop.LoopControl(
+    control = autoloop.LoopControl(
         question=None,
-        promise=superloop.PROMISE_COMPLETE,
+        promise=autoloop.PROMISE_COMPLETE,
         source="canonical",
         raw_payload=None,
     )
     calls: list[str] = []
 
-    monkeypatch.setattr(superloop, "check_dependencies", lambda require_git=True: None)
-    monkeypatch.setattr(superloop, "resolve_codex_exec_command", lambda model: fake_codex_command())
+    monkeypatch.setattr(autoloop, "check_dependencies", lambda require_git=True: None)
+    monkeypatch.setattr(autoloop, "resolve_codex_exec_command", lambda model: fake_codex_command())
     monkeypatch.setattr(
-        superloop,
+        autoloop,
         "run_codex_phase",
         lambda *args, **kwargs: calls.append(args[5]) or "<loop-control></loop-control>",
     )
-    monkeypatch.setattr(superloop, "parse_phase_control", lambda *args, **kwargs: control)
-    monkeypatch.setattr(superloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(autoloop, "parse_phase_control", lambda *args, **kwargs: control)
+    monkeypatch.setattr(autoloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(
-        superloop.sys,
+        autoloop.sys,
         "argv",
         [
-            "superloop.py",
+            "autoloop.py",
             "--workspace",
             str(tmp_path),
             "--pairs",
@@ -3030,7 +3054,7 @@ def test_main_resume_skips_plan_pair_when_plan_already_completed(tmp_path: Path,
         ],
     )
 
-    exit_code = superloop.main()
+    exit_code = autoloop.main()
     assert exit_code == 0
     assert calls == ["implement", "implement"]
 
@@ -3050,27 +3074,27 @@ def test_main_non_resume_does_not_skip_prior_run_phase_pair_completion(tmp_path:
     prior_recorder.emit("pair_completed", pair="implement", cycle=1, attempt=1, phase_id="phase-1")
     prior_recorder.emit("run_finished", status="success")
 
-    control = superloop.LoopControl(
+    control = autoloop.LoopControl(
         question=None,
-        promise=superloop.PROMISE_COMPLETE,
+        promise=autoloop.PROMISE_COMPLETE,
         source="canonical",
         raw_payload=None,
     )
     calls: list[tuple[str, str]] = []
-    monkeypatch.setattr(superloop, "check_dependencies", lambda require_git=True: None)
-    monkeypatch.setattr(superloop, "resolve_codex_exec_command", lambda model: fake_codex_command())
+    monkeypatch.setattr(autoloop, "check_dependencies", lambda require_git=True: None)
+    monkeypatch.setattr(autoloop, "resolve_codex_exec_command", lambda model: fake_codex_command())
     monkeypatch.setattr(
-        superloop,
+        autoloop,
         "run_codex_phase",
         lambda *args, **kwargs: calls.append((args[5], kwargs["active_phase_selection"].phase_ids[0])) or "<loop-control></loop-control>",
     )
-    monkeypatch.setattr(superloop, "parse_phase_control", lambda *args, **kwargs: control)
-    monkeypatch.setattr(superloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(autoloop, "parse_phase_control", lambda *args, **kwargs: control)
+    monkeypatch.setattr(autoloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(
-        superloop.sys,
+        autoloop.sys,
         "argv",
         [
-            "superloop.py",
+            "autoloop.py",
             "--workspace",
             str(tmp_path),
             "--pairs",
@@ -3083,7 +3107,7 @@ def test_main_non_resume_does_not_skip_prior_run_phase_pair_completion(tmp_path:
         ],
     )
 
-    exit_code = superloop.main()
+    exit_code = autoloop.main()
     assert exit_code == 0
     assert calls == [("implement", "phase-1"), ("implement", "phase-1")]
 
@@ -3096,23 +3120,23 @@ def test_main_test_only_requires_prior_implement_completion(tmp_path: Path, monk
         intent_mode="replace",
     )
     write_phase_plan(phase_plan_file(paths["task_dir"]), "test-only-phase-task")
-    control = superloop.LoopControl(
+    control = autoloop.LoopControl(
         question=None,
-        promise=superloop.PROMISE_COMPLETE,
+        promise=autoloop.PROMISE_COMPLETE,
         source="canonical",
         raw_payload=None,
     )
 
-    monkeypatch.setattr(superloop, "check_dependencies", lambda require_git=True: None)
-    monkeypatch.setattr(superloop, "resolve_codex_exec_command", lambda model: fake_codex_command())
-    monkeypatch.setattr(superloop, "run_codex_phase", lambda *args, **kwargs: "<loop-control></loop-control>")
-    monkeypatch.setattr(superloop, "parse_phase_control", lambda *args, **kwargs: control)
-    monkeypatch.setattr(superloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(autoloop, "check_dependencies", lambda require_git=True: None)
+    monkeypatch.setattr(autoloop, "resolve_codex_exec_command", lambda model: fake_codex_command())
+    monkeypatch.setattr(autoloop, "run_codex_phase", lambda *args, **kwargs: "<loop-control></loop-control>")
+    monkeypatch.setattr(autoloop, "parse_phase_control", lambda *args, **kwargs: control)
+    monkeypatch.setattr(autoloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(
-        superloop.sys,
+        autoloop.sys,
         "argv",
         [
-            "superloop.py",
+            "autoloop.py",
             "--workspace",
             str(tmp_path),
             "--pairs",
@@ -3127,7 +3151,7 @@ def test_main_test_only_requires_prior_implement_completion(tmp_path: Path, monk
         ],
     )
 
-    exit_code = superloop.main()
+    exit_code = autoloop.main()
     assert exit_code == 1
 
     task_meta = json.loads(paths["task_meta_file"].read_text(encoding="utf-8"))
@@ -3142,23 +3166,23 @@ def test_main_implement_without_phase_plan_uses_implicit_phase(tmp_path: Path, m
         product_intent="Legacy request",
         intent_mode="replace",
     )
-    control = superloop.LoopControl(
+    control = autoloop.LoopControl(
         question=None,
-        promise=superloop.PROMISE_COMPLETE,
+        promise=autoloop.PROMISE_COMPLETE,
         source="canonical",
         raw_payload=None,
     )
 
-    monkeypatch.setattr(superloop, "check_dependencies", lambda require_git=True: None)
-    monkeypatch.setattr(superloop, "resolve_codex_exec_command", lambda model: fake_codex_command())
-    monkeypatch.setattr(superloop, "run_codex_phase", lambda *args, **kwargs: "<loop-control></loop-control>")
-    monkeypatch.setattr(superloop, "parse_phase_control", lambda *args, **kwargs: control)
-    monkeypatch.setattr(superloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(autoloop, "check_dependencies", lambda require_git=True: None)
+    monkeypatch.setattr(autoloop, "resolve_codex_exec_command", lambda model: fake_codex_command())
+    monkeypatch.setattr(autoloop, "run_codex_phase", lambda *args, **kwargs: "<loop-control></loop-control>")
+    monkeypatch.setattr(autoloop, "parse_phase_control", lambda *args, **kwargs: control)
+    monkeypatch.setattr(autoloop, "criteria_all_checked", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(
-        superloop.sys,
+        autoloop.sys,
         "argv",
         [
-            "superloop.py",
+            "autoloop.py",
             "--workspace",
             str(tmp_path),
             "--pairs",
@@ -3171,7 +3195,7 @@ def test_main_implement_without_phase_plan_uses_implicit_phase(tmp_path: Path, m
         ],
     )
 
-    exit_code = superloop.main()
+    exit_code = autoloop.main()
     assert exit_code == 0
 
     task_meta = json.loads(paths["task_meta_file"].read_text(encoding="utf-8"))

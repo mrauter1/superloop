@@ -4,14 +4,14 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from superloop import changed_paths_from_snapshot, commit_paths, phase_snapshot_ref
+from autoloop.autoloop import changed_paths_from_snapshot, commit_paths, phase_snapshot_ref
 
 
 def init_temp_git_repo() -> Path:
-    root = Path(tempfile.mkdtemp(prefix="superloop-test-"))
+    root = Path(tempfile.mkdtemp(prefix="autoloop-test-"))
     subprocess.run(["git", "init"], cwd=root, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    subprocess.run(["git", "config", "user.name", "Superloop Test"], cwd=root, check=True)
-    subprocess.run(["git", "config", "user.email", "superloop-test@example.com"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.name", "Autoloop Test"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.email", "autoloop-test@example.com"], cwd=root, check=True)
     return root
 
 
