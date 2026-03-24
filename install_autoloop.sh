@@ -42,10 +42,10 @@ done
 log "Preparing directories"
 mkdir -p "$INSTALL_ROOT" "$BIN_DIR" "$CODEX_SKILLS_DIR" "$CODEX_AGENTS_SKILLS_DIR"
 
-log "Installing Codex skill to $SKILL_DEST_DIR_PRIMARY"
+log "Installing Autoloop skill to $SKILL_DEST_DIR_PRIMARY"
 mkdir -p "$SKILL_DEST_DIR_PRIMARY"
 cp "$SKILL_SOURCE_FILE" "$SKILL_DEST_DIR_PRIMARY/SKILL.md"
-log "Installing Codex skill to $SKILL_DEST_DIR_SECONDARY"
+log "Installing Autoloop skill to $SKILL_DEST_DIR_SECONDARY"
 mkdir -p "$SKILL_DEST_DIR_SECONDARY"
 cp "$SKILL_SOURCE_FILE" "$SKILL_DEST_DIR_SECONDARY/SKILL.md"
 
@@ -84,7 +84,13 @@ chmod +x "$LAUNCHER_PATH"
 if command -v codex >/dev/null 2>&1; then
   log "Codex CLI detected."
 else
-  log "Codex CLI not found; install with: npm i -g @openai/codex"
+  log "Codex CLI not found; install it if you plan to use provider.name=codex: npm i -g @openai/codex"
+fi
+
+if command -v claude >/dev/null 2>&1; then
+  log "Claude CLI detected."
+else
+  log "Claude CLI not found; install it and run 'claude auth status' if you plan to use provider.name=claude."
 fi
 
 if command -v git >/dev/null 2>&1; then
@@ -101,4 +107,4 @@ log "Install complete."
 log "Run: autoloop --help"
 log "Skill installed: $SKILL_DEST_DIR_PRIMARY/SKILL.md"
 log "Skill installed: $SKILL_DEST_DIR_SECONDARY/SKILL.md"
-log "If Codex is already running, restart it to pick up updated skills."
+log "If your coding agent is already running, restart it to pick up updated skills."
