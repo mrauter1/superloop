@@ -35,7 +35,7 @@ Repository = "https://github.com/mrauter1/autoloop"
 Issues = "https://github.com/mrauter1/autoloop/issues"
 
 [project.scripts]
-autoloop = "autoloop.autoloop:main"
+autoloop = "autoloop.main:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

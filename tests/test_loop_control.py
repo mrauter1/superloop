@@ -12,7 +12,7 @@ from autoloop.loop_control import (
     PROMISE_INCOMPLETE,
     parse_loop_control,
 )
-from autoloop.autoloop import decide_producer_control, decide_verifier_control as decide_autoloop_verifier_control
+from autoloop.main import decide_producer_control, decide_verifier_control as decide_autoloop_verifier_control
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "loop_control"
 
