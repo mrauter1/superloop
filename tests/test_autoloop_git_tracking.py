@@ -4,7 +4,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from autoloop.autoloop import changed_paths_from_snapshot, commit_paths, phase_snapshot_ref
+from autoloop.main import changed_paths_from_snapshot, commit_paths, phase_snapshot_ref
 
 
 def init_temp_git_repo() -> Path:

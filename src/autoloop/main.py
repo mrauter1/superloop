@@ -29,15 +29,29 @@ try:
 except ImportError:  # pragma: no cover - exercised in environments without optional deps installed
     yaml = None
 
-from .loop_control import (
-    LoopControl,
-    LoopControlParseError,
-    PROMISE_BLOCKED,
-    PROMISE_COMPLETE,
-    PROMISE_INCOMPLETE,
-    criteria_all_checked,
-    parse_loop_control,
-)
+if __package__ in {None, ""}:
+    package_root = str(Path(__file__).resolve().parent.parent)
+    if package_root not in sys.path:
+        sys.path.insert(0, package_root)
+    from autoloop.loop_control import (
+        LoopControl,
+        LoopControlParseError,
+        PROMISE_BLOCKED,
+        PROMISE_COMPLETE,
+        PROMISE_INCOMPLETE,
+        criteria_all_checked,
+        parse_loop_control,
+    )
+else:
+    from .loop_control import (
+        LoopControl,
+        LoopControlParseError,
+        PROMISE_BLOCKED,
+        PROMISE_COMPLETE,
+        PROMISE_INCOMPLETE,
+        criteria_all_checked,
+        parse_loop_control,
+    )
 
 PAIR_ORDER = ["plan", "implement", "test"]
 
@@ -3460,7 +3474,7 @@ def execute_pair_cycles(
     return "failed", 1
 
 
-def main() -> int:
+def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Autoloop: optional strategy-to-execution Codex loop orchestration")
     parser.add_argument("--pairs", type=str, default=None, help="Comma list from: plan,implement,test")
     parser.add_argument("--phase-id", type=str, help="Explicit phase id for implement/test execution when phase_plan.yaml exists")
@@ -3491,12 +3505,33 @@ def main() -> int:
         default=None,
         help="Auto-answer agent questions using an extra Codex pass",
     )
-    parser.add_argument(
+    git_group = parser.add_mutually_exclusive_group()
+    git_group.add_argument(
+        "--git",
+        dest="no_git",
+        action="store_false",
+        default=None,
+        help="Initialize git and create git commits/checkpoints",
+    )
+    git_group.add_argument(
         "--no-git",
-        action=argparse.BooleanOptionalAction,
+        dest="no_git",
+        action="store_true",
         default=None,
         help="Do not initialize git or create git commits/checkpoints",
     )
+    git_group.add_argument(
+        "--no-no-git",
+        dest="no_git",
+        action="store_false",
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    return parser
+
+
+def main() -> int:
+    parser = build_arg_parser()
     args = parser.parse_args()
 
     root = Path(args.workspace).expanduser().resolve()
