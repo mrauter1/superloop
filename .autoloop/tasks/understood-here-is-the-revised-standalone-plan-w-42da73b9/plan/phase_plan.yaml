@@ -1,0 +1,102 @@
+version: 1
+task_id: understood-here-is-the-revised-standalone-plan-w-42da73b9
+request_snapshot_ref: /workspace/superloop/.autoloop/tasks/understood-here-is-the-revised-standalone-plan-w-42da73b9/runs/run-20260324T194506Z-445f9245/request.md
+phases:
+  - phase_id: provider-runtime-refactor
+    title: Provider-Neutral Runtime Refactor
+    objective: Generalize the current Codex-only runtime, config, and session plumbing so Claude can be added without regressing Codex behavior.
+    status: planned
+    in_scope:
+      - Refactor provider execution in src/autoloop/main.py behind a small shared turn-execution seam reused by pair execution and full_auto_answers.
+      - Change config parsing to support explicit nested provider selection while remaining load-compatible with legacy flat Codex provider keys.
+      - Generalize SessionState from thread_id to provider plus session_id while preserving legacy Codex resume compatibility on load.
+      - Add provider mismatch detection before resumed turns.
+    out_of_scope:
+      - Claude subprocess commands and auth checks.
+      - Strict-mode or stream-json support.
+      - Moving provider logic into a new package hierarchy.
+    dependencies: []
+    acceptance_criteria:
+      - id: AC-1
+        text: Codex remains the default provider and current Codex behavior is preserved behind the new provider-neutral seam.
+      - id: AC-2
+        text: Legacy flat Codex config and legacy session files with thread_id continue to load without breaking resume.
+      - id: AC-3
+        text: Resume fails fast when stored session provider and selected provider do not match.
+    deliverables:
+      - Provider-neutral runtime/config/session plan and implementation skeleton in src/autoloop/main.py
+      - Regression tests covering config precedence and session migration
+    risks:
+      - Refactoring the single-file runtime could accidentally alter Codex command or resume behavior.
+      - Session schema changes could leak across plan and phase-local session files if migration is inconsistent.
+    rollback:
+      - Revert provider selection to Codex-only while keeping legacy session loading intact.
+      - Restore the previous Codex-only execution helper if the shared seam causes behavior drift.
+  - phase_id: claude-cli-adapter
+    title: Claude CLI Adapter
+    objective: Add a Claude provider that uses the local claude CLI in headless JSON mode while preserving the user’s existing Claude Code environment.
+    status: planned
+    in_scope:
+      - Implement Claude preflight with claude --version and claude auth status.
+      - Build fresh and resumed Claude commands using print mode, JSON output, append-system-prompt-file, and resume session ids.
+      - Parse Claude JSON result plus session_id and persist provider metadata in the session state.
+      - Materialize Claude append-system prompt content from the existing templates and add guardrails that keep loop-control authoritative.
+      - Map optional Claude permission strategies and make full_auto_answers use the selected provider.
+      - Capture raw provider output and classify provider failures separately from loop-control parse failures.
+    out_of_scope:
+      - Anthropic SDK integration.
+      - Default tool restriction flags or strict mode.
+      - Stream-json telemetry.
+    dependencies:
+      - provider-runtime-refactor
+    acceptance_criteria:
+      - id: AC-1
+        text: Fresh and resumed Claude turns use documented print-mode JSON commands and persist the returned session_id.
+      - id: AC-2
+        text: Default Claude mode omits environment-suppressing flags such as --bare, system-prompt replacement flags, tool restriction flags, and --max-turns.
+      - id: AC-3
+        text: Provider failures preserve raw payloads for diagnostics and do not get misreported as loop-control parse errors.
+      - id: AC-4
+        text: Configured Claude model, effort, and permission strategy overrides map to CLI flags only when explicitly requested.
+    deliverables:
+      - Claude provider execution path in src/autoloop/main.py
+      - Claude-specific unit tests for commands, parsing, and failure handling
+      - Prompt-assembly changes that preserve current Autoloop pair instructions while using append-system-prompt-file
+    risks:
+      - Inherited Claude environment features may bypass Autoloop’s clarification/completion contract.
+      - Permission prompts may block unattended runs unless failures are surfaced clearly.
+      - Prompt splitting between -p and append-system-prompt-file could drift from current template intent if not mapped carefully.
+    rollback:
+      - Disable provider.name=claude and route users back to Codex while leaving provider-neutral runtime changes in place.
+      - Remove Claude-specific config/docs if live validation shows default inherited mode is not viable.
+  - phase_id: validation-and-operator-surface
+    title: Validation And Operator Surface
+    objective: Finish regression coverage, update operator-facing docs, and document the live validation required before broad Claude rollout.
+    status: planned
+    in_scope:
+      - Extend repository tests for provider selection, session migration, resume mismatch, Claude command construction, parsing, and provider-aware auto answers.
+      - Update README and setup/install messaging so provider prerequisites and defaults are accurate.
+      - Record the manual live-validation checklist for inherited-environment Claude repos and config-drift resume scenarios.
+      - Document strict mode and stream-json as deferred follow-up work rather than default behavior.
+    out_of_scope:
+      - Shipping strict mode in the default Claude path.
+      - Adding telemetry infrastructure beyond current raw logs.
+    dependencies:
+      - claude-cli-adapter
+    acceptance_criteria:
+      - id: AC-1
+        text: Automated tests cover the new provider/config/session contracts and unchanged Codex behavior.
+      - id: AC-2
+        text: User-facing docs no longer describe Codex as the only provider and explain the new nested provider config.
+      - id: AC-3
+        text: Maintainers have an explicit live-validation checklist for inherited Claude environments and config-drift resume behavior.
+    deliverables:
+      - Updated tests under tests/
+      - Updated README.md and setup/install messaging
+      - Recorded live-validation checklist for Claude rollout
+    risks:
+      - Documentation may drift from the implemented provider contract if updated separately from tests.
+      - Skipping representative live validation could hide loop-control violations caused by hooks, skills, or plugins.
+    rollback:
+      - Revert Claude-facing docs and examples if validation is incomplete.
+      - Keep Claude support marked experimental until live validation passes.
